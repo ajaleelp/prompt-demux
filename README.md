@@ -76,6 +76,25 @@ local models, whatever.
 want to run anything local, and trust their router's judgment — use it.
 This project trades convenience for control.
 
+## Similar work (and how this differs)
+
+The routing space is crowded — but the *combination* this plugin occupies is
+not. Here's the honest landscape (Sept 2026):
+
+| Project | What it is | How `prompt-demux` differs |
+|---|---|---|
+| [claude-code-router](https://github.com/musistudio/claude-code-router) (~37k★) | Local **proxy gateway** switching **models** across providers/agents | A proxy, not a plugin — can't touch OpenCode's per-message `model.variant` state; switches models (cache-expensive), not effort |
+| [weave-os/router](https://github.com/weave-os/router) (~3.9k★) | Go proxy, per-action **model** route using a tiny embedder | Proxy again; effort-only in-process routing (which never breaks the cache) is its blind spot |
+| [opencode-model-router](https://github.com/marco-jardim/opencode-model-router) (102★) | OpenCode plugin, but **LLM prompt delegation** — an orchestrator re-delegates via subagents | No ML classifier, no local model; costs an LLM round-trip per message; not cache-friendly by design |
+| [opencode-reasoning-effort](https://github.com/Aliancn/opencode-reasoning-effort) | Narrows to one thing: patch `fetch` so `reasoning_effort` reaches the wire | Single-purpose patch; no complexity tiering, no fallback, no config |
+| OpenRouter `auto` / `pareto-code` | Server-side opaque model routing | Not local, not auditable, no per-message effort dial, runs outside OpenCode |
+
+The combination that's unoccupied: **in-process OpenCode plugin + local ML
+classifier + effort-first dialing (same model, `@low/@high/@max`) + cache
+stickiness** — so the prompt cache never breaks. A proxy can't see
+OpenCode's per-message effort state; an LLM-delegation plugin spends more and
+can't guarantee cache warmth. That's the square this project sits in.
+
 ## What it does
 
 ```mermaid
@@ -462,12 +481,39 @@ node --test tests/lib.test.ts    # 19 unit tests
 node tests/smoke.mjs             # integration (needs classifier running)
 ```
 
+Accuracy benchmark (fp32 vs int8 vs heuristic, labeled 30-query set):
+
+```bash
+classifier-service/venv/bin/python classifier-service/tests/accuracy_bench.py
+```
+
 ## Benchmarks (Intel i7-9750H, CPU only)
+
+**Latency** (classifier service):
 
 | Variant | Median latency | Notes |
 |---------|---------------|-------|
 | ONNX fp32 | ~31 ms | **chosen** — best label quality |
 | ONNX int8 | ~17 ms | faster but misclassifies HARD queries |
+
+**Accuracy — what happens if we go lighter?** Measured on a labeled 30-query
+set (10 per tier), exact tier-match:
+
+| Option | Size | Accuracy | The real cost |
+|---|---|---|---|
+| fp32 ModernBERT (service) | 571 MB | **66.7%** | reference |
+| int8 ModernBERT | 144 MB | **43.3%** | ❌ collapses MEDIUM (0% recall) and misdials 7 HARD queries→EASY |
+| heuristic only (no model) | 0 MB | 56.7% | misses ~half the HARD set (→MEDIUM) |
+
+The sobering finding: **the int8 quantized model is the *worst* option —
+worse than shipping no model at all.** It drops the entire MEDIUM class and
+labels hard architecture/consensus prompts "EASY", which would send them to
+the cheapest tier. This is why the README's "eventual in-process classifier"
+should **not** just swap in the current int8 export: it needs either fp32
+(which is heavy) or a *re-trained* small model (e.g. MiniLM) benchmarked to
+roughly match fp32 before it's worth shipping. Until then, the defensive
+position is the current one: fp32 behind the service, heuristic as the
+always-on fallback.
 
 ## Design notes & honest findings
 
