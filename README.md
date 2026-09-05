@@ -1,5 +1,35 @@
 <div align="center">
 
+> ## 🛑 STATUS: PAUSED — do not rely on this yet
+>
+> Development is paused while we reassess the approach. Honest concerns with
+> the current design:
+>
+> 1. **Per-message complexity classification is a weak proxy.** A short
+>    message riding on a huge, complex context — *"fix it"* after 200k tokens
+>    of debugging — is classified by the text alone, so it lands on a
+>    low-effort tier and the model fumbles. The classifier doesn't see the
+>    context it's about to work on.
+> 2. **Heuristic complexity scoring is near-random.** LiteLLM's own benchmark
+>    measured a rule-based complexity scorer at **AUC ≈ 0.52** — barely better
+>    than a coin flip. Our classifier (ModernBERT fine-tune) is better than
+>    that, but the signal quality of "complexity from a single prompt" is a
+>    known open problem.
+> 3. **The lightweight model trap is real.** Our own measured accuracy:
+>    fp32 ModernBERT 66.7% / int8 ModernBERT 43.3% / heuristic 0%. The int8
+>    export is *worse than shipping no model* — it collapses the MEDIUM tier
+>    and misdials HARD queries to EASY. There is no free lunch to a lighter
+>    model without retraining.
+> 4. **Errors don't mean "hard."** A flaky test or a missing dependency isn't
+>    task complexity — a failure is evidence the *current attempt* isn't
+>    resolving, not that the task itself is complex. Treating failures as
+>    complexity inflates tiers on trivial-but-failing work.
+> 5. **The root cause may be harness misuse, not routing.** Long-running
+>    single threads cause context bloat, quality degradation, and lossy
+>    compaction. The industry answer to that is short focused threads +
+>    subagents, not a better model selector. Until we validate session hygiene
+>    as the fix, a router is polishing the wrong layer.
+
 # prompt-demux
 
 **Dial the right amount of effort for every prompt.**
