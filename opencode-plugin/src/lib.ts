@@ -2,7 +2,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
-/** Virtual provider injected into the model dropdown. Pick prompt-demux/* to enable routing. */
+/** Virtual provider injected into the model dropdown. Pick prompt-demux/* to enable dialing. */
 export const PROVIDER_ID = "prompt-demux"
 export const PROVIDER_NAME = "Prompt Demux"
 export const AUTO_MODEL = "auto"

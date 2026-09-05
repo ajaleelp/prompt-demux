@@ -2,22 +2,24 @@
 
 # prompt-demux
 
-**Your queries aren't all equal. Stop paying like they are.**
+**Dial the right amount of effort for every prompt.**
 
-A local, CPU-only query classifier that routes each OpenCode message to the
-right model — trivial chats to the cheap/free tier, hard problems to whatever
-you trust most. ~31 ms, no GPU, no cloud in the routing decision.
+A local, CPU-only classifier that reads each prompt's complexity, then
+**dials the response budget** for it — trivial chats get low effort / a cheap
+model, hard problems get maximum effort / a stronger model. ~31 ms, no GPU,
+no cloud in the decision.
 
-**Bring your own models.** The router is deliberately provider-agnostic: every
-tier can point at any model on any provider (`opencode/…`, `openrouter/…`, a
-local Ollama model, anything OpenCode can call). The modes shipped in the repo
-are just the author's personal defaults — a starting point, not a prescription.
-`prompt-demux.json` is **your** file to shape.
+**Two knobs, one dial face.** A "route" is `provider/model[@variant]`:
+- *model* — which model handles the request (`opencode/…`, `openrouter/…`, local `ollama/…`)
+- *`@variant`* — how much reasoning **effort** that model applies (`@low` / `@high` / `@max`, or the provider's own preset)
 
-**Works entirely within OpenCode by default** — the default modes use the
-built-in `opencode/` provider (via a free [OpenCode Zen](https://opencode.ai/zen)
-account), so you never need a third-party model gateway. If you already
-have OpenRouter keys, swapping the model refs is a one-line change (see
+You can hop models, hop effort, or both. Defaults in the repo are the
+author's personal picks — not a prescription. `prompt-demux.json` is **your**
+file to shape.
+
+**Works entirely within OpenCode by default** — the built-in `opencode/`
+provider (free [OpenCode Zen](https://opencode.ai/zen) account), no
+third-party gateway. OpenRouter keys? One-line swap (see
 [Configuration](#configuration)).
 
 [![CI](https://github.com/ajaleelp/prompt-demux/actions/workflows/ci.yml/badge.svg)](https://github.com/ajaleelp/prompt-demux/actions)
@@ -31,18 +33,21 @@ have OpenRouter keys, swapping the model refs is a one-line change (see
 
 ## Why this exists
 
-With one model configured, every query pays the same price — whether it's
-"thanks!" or "design a distributed consensus protocol." Two failure modes:
+Every prompt in a coding session doesn't deserve the same response budget.
+"thanks!" and "design a distributed consensus protocol" shouldn't cost the
+same in effort (or money). Two failure modes:
 
-1. **Premium-model-everything**: your credits drain on trivial queries
-2. **Cheap-model-everything**: you save money until the model fumbles the hard task
+1. **Premium-everything**: maximum reasoning applied to trivial queries — slow, credits drain
+2. **Cheap-everything**: a light model fumbles the hard task — time wasted redoing it
 
-Model routing solves both: classify per query, spend only where it matters.
+prompt-demux solves both: read each prompt's complexity, dialing the right
+effort (and the right model) per message — spend heavily only where it
+matters.
 
 > **The defaults in this repo are what I prefer — not what you should use.** The
-> router just maps three complexity tiers to whatever models *you* want. Pick
-> models you already have access to, care about price or quality, use different
-> providers per tier, use local models — it's all config.
+> dial just maps three complexity tiers to whatever effort/models *you* want.
+> Pick models you have access to, tune effort to taste, use different providers
+> per tier, use local models — it's all config.
 
 ### Why not just let a gateway auto-route (e.g. OpenRouter's `auto`)?
 
@@ -51,12 +56,13 @@ This project exists because "genuinely good" wasn't the same as what I needed:
 
 | | gateway `auto` (e.g. `openrouter/auto`) | prompt-demux |
 |---|---|---|
-| **Which model runs my query** | Opaque model picks from their catalog | You pin exact model per tier, per mode |
+| **What runs my prompt** | Opaque model picks from their catalog | You pin exact model *and effort level* per tier |
+| **Effort control** | Server-side, opaque | Local, exact — `@variant` reasoning effort per tier, or per message |
 | **Wallet topology** | One wallet — when it's empty, everything stops | **Multi-wallet runway**: map tiers to different providers/accounts — free tiers for EASY, a separate cheap pool for MEDIUM, premium credits only for HARD |
 | **Top-up economics** | ~5% credit purchase fee on all usage | Most traffic can flow through direct/free channels |
 | **Routing logic** | Server-side, not inspectable | Local ONNX model + your config, fully auditable |
 | **Latency** | adds server-side round trip | ~31 ms on CPU, fully offline |
-| **Override / steering** | fallback model list | `!easy` `!hard` `!mode:` prefixes, session-sticky modes |
+| **Override / steering** | fallback model list | `!easy` `!hard` `!effort:low` `!mode:` prefixes, session-sticky modes |
 | **Setup** | one line | plugin + ~750 MB local model |
 
 The killer feature is **credit runway**: when EASY goes to a free tier and
@@ -75,7 +81,7 @@ This project trades convenience for control.
 ```mermaid
 flowchart TD
     A["User message in OpenCode"] --> B{"Leading !override?"}
-    B -- "!easy / !hard / !mode:" --> C["Force tier or mode"]
+    B -- "!easy / !hard / !effort:x / !mode:" --> C["Force tier, effort, or mode"]
     B -- no --> D{"Zero-cost heuristics"}
     D -- "greetings, acks" --> E["EASY - 0 ms"]
     D -- "real query" --> F["Local classifier - ModernBERT ONNX - CPU - ~31 ms"]
@@ -84,15 +90,15 @@ flowchart TD
     E --> H
     G --> H
     H --> I["balanced: EASY->glm-5.3-flash / MEDIUM->deepseek-v4-pro / HARD->kimi-k3"]
-    H --> I2["frontier-value: EASY->glm-5.3-flash / MEDIUM->gemini-3.8-flash / HARD->claude-fable-5-1"]
-    I --> K["OpenCode calls routed model"]
+    H --> I2["effort: gemini-3.8-flash@low / @high / @max (one model, dialed effort)"]
+    I --> K["OpenCode calls the dialed model + effort"]
     I2 --> K
     H --> J["Free tier / budget pool / premium - your choice"]
     J --> K
-    K --> L["Subagents: routed per their own subtask"]
+    K --> L["Subagents: dialed per their own subtask"]
 ```
 
-Every decision is logged (`routed HARD -> .../kimi-k3 source=classifier
+Every decision is logged (`dialed HARD -> .../kimi-k3@max source=classifier
 confidence=0.99`) and cached — repeated queries cost 0 ms.
 
 ## Verified behavior (live E2E on OpenCode 1.18.x, with the author's default routes)
@@ -100,31 +106,32 @@ confidence=0.99`) and cached — repeated queries cost 0 ms.
 | Scenario | Result |
 |---|---|
 | "thanks" | heuristic → EASY → glm-5.3-flash (0 ms) |
-| "Explain closures in JavaScript" | classifier → MEDIUM → deepseek-v4-pro (balanced) / gemini-3.8-flash (frontier-value) |
-| "Implement a distributed consensus algorithm" | classifier → HARD → kimi-k3 (balanced) / claude-fable-5-1 (frontier-value) |
+| "Explain closures in JavaScript" | classifier → MEDIUM → deepseek-v4-pro (balanced) / gemini-3.8-flash@high (effort) |
+| "Implement a distributed consensus algorithm" | classifier → HARD → kimi-k3 (balanced) / gemini-3.8-flash@max (effort) |
 | `!hard ...` prefix | override → HARD model, prefix stripped from model-visible text |
 | `!mode:frontier-value ...` | mode override, sticks for the session |
-| Task-tool subagent | routed **per its own task complexity** (child sessions flow through the same hook) |
+| effort mode (`@low/@high/@max`) | same model, reasoning-effort variant merged into the request (verified live) |
+| Task-tool subagent | dialed **per its own task complexity** (child sessions flow through the same hook) |
 | plugin off (`--pure`) | nominal model used (control test) |
 
 ## The cost math
 
 Using the author's default config on the `opencode/` provider (Zen pricing,
-per answer) — swap in your own models and the numbers change, but the *shape*
-stays:
+per answer) — effort dialing and model hopping; swap in your own models and
+the numbers change, but the *shape* stays:
 
-| Query | Routed model | Cost | Un-routed (premium) | Savings |
+| Query | Dialed target | Cost | Un-dialed (max effort premium) | Savings |
 |---|---|---|---|---|
 | "Reply with exactly: OK" (EASY) | glm-5.3-flash | ~$0.00002 | ~$0.50 | **~99%** |
 | "Explain closures..." (MEDIUM) | deepseek-v4-pro | ~$0.001 | ~$0.50 | ~99% |
-| "Implement distributed consensus" (HARD) | kimi-k3 / claude-fable-5-1 | premium | premium | by design |
+| "Implement distributed consensus" (HARD) | kimi-k3 / claude-fable-5-1@max | premium | premium | by design |
 
 Illustrative session mix (70% EASY / 20% MEDIUM / 10% HARD, ~150-token
-prompts): routing EASY to something cheap and keeping HARD premium yields
-roughly **3–6× more premium budget remaining** vs sending everything to the
-premium model — the difference between topping up weekly and monthly. Your mix
-will differ; the point is the *shape*: most chat is EASY, and EASY shouldn't
-burn premium credits.
+prompts): dialing EASY to something cheap/effort-low and keeping HARD at max
+effort yields roughly **3–6× more premium budget remaining** vs sending
+everything to the max-effort premium model — the difference between topping
+up weekly and monthly. Your mix will differ; the point is the *shape*: most
+chat is EASY, and EASY shouldn't burn premium credits or reasoning tokens.
 
 Add free tiers (an `…:free` variant or the `opencode/…-free` models) as your
 EASY target and the floor drops to $0.00.
@@ -163,11 +170,11 @@ cd prompt-demux
    `/tmp/prompt-demux-classifier.log`).
 
 That's the whole setup. Restart OpenCode (full quit), pick **Prompt Demux Auto**
-from the dropdown, and you're routing. Verify from the CLI:
+from the dropdown, and prompts get dialed automatically. Verify from the CLI:
 
 ```bash
-opencode run -m prompt-demux/auto "thanks" --print-logs | grep routed
-# routed EASY -> opencode/glm-5.3-flash source=heuristic
+opencode run -m prompt-demux/auto "thanks" --print-logs | grep -E "dialed|routed"
+# ... dialed EASY -> opencode/glm-5.3-flash source=heuristic
 ```
 
 ### What each piece does (manual, if you prefer the pieces separately)
@@ -305,23 +312,73 @@ The full OpenRouter variant of the default config:
 Model refs are `provider/model` (split on the **first** slash, so OpenRouter
 slugs like `openrouter/anthropic/claude-fable-5.1` work as-is).
 
-### Configuring your routes (the part that's *yours*)
+### Effort hopping (`provider/model@variant`) — a headline feature
 
-The config is a plain JSON file — no code involved. The part you'll care
-about is just three lines per mode:
+Effort is the first-class dial: a tier can map to *the same model at different
+reasoning efforts*, instead of switching models. This is the preferred 2026
+pattern for keeping provider prompt caches warm — you pay for reasoning
+tokens, not cache misses.
 
 ```json
-"EASY":   "opencode/glm-5.3-flash",   // trivial: greetings, thanks, small questions
-"MEDIUM": "opencode/deepseek-v4-pro", // typical dev tasks
-"HARD":   "opencode/kimi-k3"          // hard problems: architecture, debugging at scale
+"effort": {
+  "description": "One model, effort dialed per tier",
+  "EASY":   "opencode/gemini-3.8-flash@low",
+  "MEDIUM": "opencode/gemini-3.8-flash@high",
+  "HARD":   "opencode/gemini-3.8-flash@max"
+}
+```
+
+End a ref with `@variant` and OpenCode merges that model's named variant
+(reasoning effort / thinking budget) into the request for that message.
+Variants come from OpenCode's built-in defaults (e.g. Anthropic `high`/`max`,
+OpenAI `none`/…/`xhigh`, Google `low`/`high`), or you can define your own per
+model in `opencode.json`:
+
+```json
+{ "provider": { "opencode": { "models": { "gemini-3.8-flash": {
+  "variants": { "low": { "thinkingLevel": "low" }, "high": { "thinkingLevel": "high" } }
+} } } } }
+```
+
+A plain `provider/model` ref works too (default effort) — the `@variant`
+suffix is optional. Verified end-to-end: the chosen variant's options are
+merged into both the main and auxiliary (title) requests.
+
+### Model hopping (`provider/model`) — switch models per tier
+
+Prefer different models per tier (cost / capability split across vendors)?
+That's the same dial — just swap the `provider/model` string:
+
+```json
+"balanced": {
+  "EASY":   "opencode/glm-5.3-flash",   // trivial: greetings, thanks, small questions
+  "MEDIUM": "opencode/deepseek-v4-pro", // typical dev tasks
+  "HARD":   "opencode/kimi-k3"          // hard problems: architecture, debugging at scale
+}
+```
+
+Both hops can coexist — mix `provider/model` and `provider/model@variant`
+refs freely across modes.
+
+### Configuring your routes (the part that's *yours*)
+
+The config is a plain JSON file — no code involved. A mode is just three
+lines:
+
+```json
+"my-mode": {
+  "EASY":   "opencode/glm-5.3-flash",       // cheap + low effort
+  "MEDIUM": "opencode/gemini-3.8-flash@high",
+  "HARD":   "opencode/claude-fable-5-1@max" // max effort on the best model
+}
 ```
 
 Rules of thumb:
 
-- **Swap the `provider/model` string** to change what a tier uses — that's
-  the whole feature. Find exact IDs with `opencode models` and paste any
-  model you have access to: `opencode/…`, `openrouter/…`, or a local
-  `ollama/…`.
+- **Swap the ref** to change what a tier uses — that's the whole feature.
+  Find exact IDs with `opencode models` and paste any model you have access
+  to: `opencode/…`, `openrouter/…`, or a local `ollama/…`. Add `@variant`
+  to set effort.
 - **`activeMode`** picks which mode is used by default. Switch it to
   `"frontier-value"` for higher quality (pricier), or `"free-optimal"` for
   $0 across the board — or set your own.
@@ -334,36 +391,6 @@ Rules of thumb:
 Need a free option? The `free-optimal` mode uses `opencode/…` Zen models
 (details above). You can also point EASY at an `…:free` variant on whatever
 provider you use.
-
-### Effort hopping (`provider/model@variant`)
-
-Beyond switching *models*, a tier can hop *effort* on one model — the
-preferred pattern in 2026 for keeping provider prompt caches warm. End a ref
-with `@variant` and OpenCode merges that model's named variant (reasoning
-effort / thinking budget) into the request for that message:
-
-```json
-"effort": {
-  "description": "One model, effort dialed per tier",
-  "EASY":   "opencode/gemini-3.8-flash@low",
-  "MEDIUM": "opencode/gemini-3.8-flash@high",
-  "HARD":   "opencode/gemini-3.8-flash@max"
-}
-```
-
-Variants come from OpenCode's built-in defaults (e.g. Anthropic `high`/`max`,
-OpenAI `none`/…/`xhigh`, Google `low`/`high`), or you can define your own per
-model in `opencode.json`:
-
-```json
-{ "provider": { "opencode": { "models": { "gemini-3.8-flash": {
-  "variants": { "low": { "thinkingLevel": "low" } }
-} } } } }
-```
-
-A plain `provider/model` ref routes as today — the `@variant` suffix is
-optional. Verified end-to-end: the chosen variant's options are merged into
-both the main and auxiliary (title) requests.
 
 ### Overrides (message prefix, stripped before the model sees them)
 
@@ -399,7 +426,7 @@ prompt-demux/
 │   ├── setup.sh               # one-command install (venv, model, shim, server)
 │   └── install-global.sh      # global plugin shim + default config
 ├── .opencode/plugins/prompt-demux.ts   # shim OpenCode auto-loads
-└── prompt-demux.json                    # routing modes config
+└── prompt-demux.json                    # dialing modes config
 ```
 
 ## Tests
@@ -422,9 +449,10 @@ node tests/smoke.mjs             # integration (needs classifier running)
 ## Design notes & honest findings
 
 - **The `chat.model` hook doesn't exist.** Most plugin docs/examples
-  reference it; OpenCode 1.18.x does not. Routing is implemented via the
-  `chat.message` hook mutating `UserMessage.model` — verified end-to-end
-  (routed model actually generates, confirmed against stored sessions).
+  reference it; OpenCode 1.18.x does not. Dialing is implemented via the
+  `chat.message` hook mutating `UserMessage.model` (and its `variant` for
+  effort) — verified end-to-end (the dialed model/effort actually generates,
+  confirmed against stored sessions).
 - **Subagents are better than "inherited"**: child Task-tool sessions flow
   through the same hook, so each subagent gets routed per its own subtask.
 - **Classifier quirk**: it rates "**Write** a distributed consensus

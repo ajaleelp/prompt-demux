@@ -1,4 +1,4 @@
-"""Local query complexity classifier for OpenCode model routing.
+"""Local query complexity classifier for OpenCode prompt dialing (effort + model).
 
 Runs a ModernBERT-base fine-tune (ONNX) fully offline on CPU.
 Model: anasnassar/llm-query-complexity-classifier (via its ONNX export).

@@ -82,7 +82,7 @@ export const PromptDemuxPlugin: Plugin = async ({ client, worktree, directory })
 
         const models: Record<string, unknown> = {
           [AUTO_MODEL]: {
-            name: `${PROVIDER_NAME} Auto (classify & route)`,
+            name: `${PROVIDER_NAME} Auto (classify & dial)`,
             tool_call: true,
             limit: { context: 1_000_000, output: 32_000 },
             cost: { input: 0, output: 0 },
@@ -221,7 +221,7 @@ export const PromptDemuxPlugin: Plugin = async ({ client, worktree, directory })
         }
       }
 
-      await log("info", `routed ${tier} -> ${routed.providerID}/${targetLabel}`, {
+      await log("info", `dialed ${tier} -> ${routed.providerID}/${targetLabel}`, {
         sessionID: input.sessionID,
         mode: modeName,
         tier,
@@ -237,9 +237,9 @@ export const PromptDemuxPlugin: Plugin = async ({ client, worktree, directory })
     tool: {
       router: tool({
         description:
-          "Manage query complexity routing modes for this project. Modes map complexity tiers (EASY/MEDIUM/HARD) to LLM models. " +
+          "Manage prompt-demux dialing modes for this project. Modes map complexity tiers (EASY/MEDIUM/HARD) to model+effort targets. " +
           "Use action 'list' to show available modes and the active one, 'set' to make a mode the default for new sessions, " +
-          "and 'add' to create a new mode. Model refs use the form provider/model, e.g. 'openrouter/anthropic/claude-sonnet-4'.",
+          "and 'add' to create a new mode. Model refs use the form provider/model[@variant], e.g. 'opencode/gemini-3.8-flash@high'.",
         args: {
           action: tool.schema.enum(["list", "set", "add"]).describe("What to do"),
           mode: tool.schema.string().optional().describe("Mode name (for 'set' and 'add')"),

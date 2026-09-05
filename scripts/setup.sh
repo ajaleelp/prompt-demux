@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-command setup: classifier service (venv + deps + model) + plugin deps + global install.
-# Use this if you just cloned the repo and want routing working end-to-end.
+# Use this if you just cloned the repo and want dialing working end-to-end.
 #
 # You must have: Python 3.9+, Node 22+, and an OpenRouter key in OpenCode.
 # Usage: ./scripts/setup.sh [-y]   (add -y to skip the confirmation prompt)
@@ -27,7 +27,7 @@ echo "     - start a local server on http://127.0.0.1:8010"
 echo ""
 echo "  2. The OpenCode plugin (TypeScript):"
 echo "     - npm install in opencode-plugin/ (pulls @opencode-ai/plugin)"
-echo "     - install a GLOBAL shim so routing works in every project:"
+echo "     - install a GLOBAL shim so dialing works in every project:"
 echo "         ~/.config/opencode/plugins/prompt-demux.ts"
 echo "       and a default config (only if you have none):"
 echo "         ~/.config/opencode/prompt-demux.json"
@@ -95,8 +95,8 @@ echo "   2. In the model dropdown, pick 'Prompt Demux Auto'."
 echo "   3. Send a message — easy ones hit glm-5.3-flash, hard"
 echo "      ones hit kimi-k3 (or your configured mode)."
 echo ""
-echo " To see routing in action from the CLI:"
-echo "   opencode run -m prompt-demux/auto 'thanks' --print-logs | grep routed"
+echo " To see dialing in action from the CLI:"
+echo "   opencode run -m prompt-demux/auto 'thanks' --print-logs | grep -E 'dialed|routed'"
 echo ""
 echo " Restart the classifier later with:"
 echo "   classifier-service/venv/bin/python classifier-service/server.py"
