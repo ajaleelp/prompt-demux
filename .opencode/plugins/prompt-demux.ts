@@ -1,0 +1,1 @@
+export { PromptDemuxPlugin } from "../../opencode-plugin/src/main"

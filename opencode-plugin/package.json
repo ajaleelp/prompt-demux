@@ -1,0 +1,20 @@
+{
+  "name": "prompt-demux",
+  "version": "1.0.0",
+  "description": "OpenCode plugin that demultiplexes every prompt to the right model and effort tier (local CPU classifier)",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "5.6"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.27"
+  }
+}
