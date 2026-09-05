@@ -13,7 +13,7 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_DIR"
 
 echo "========================================================"
-echo " opencode-prompt-demux setup"
+echo " prompt-demux setup"
 echo "========================================================"
 echo ""
 echo "This will install:"

@@ -1,20 +1,38 @@
 {
-  "name": "prompt-demux",
-  "version": "1.0.0",
-  "description": "OpenCode plugin that demultiplexes every prompt to the right model and effort tier (local CPU classifier)",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "name": "opencode-effort-demux",
+  "version": "0.1.0",
+  "description": "OpenCode plugin: dial the right reasoning effort (or model) for every prompt via a local CPU classifier. Effort-first, cache-friendly.",
   "type": "module",
+  "main": "./src/main.ts",
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/lib.test.ts",
+    "smoke": "node tests/smoke.mjs"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "model",
+    "routing",
+    "reasoning",
+    "effort",
+    "demux",
+    "classifier",
+    "llm"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.0.0 <3.0.0"
+  },
   "devDependencies": {
+    "@opencode-ai/plugin": "1.18.27",
     "@types/node": "^22.20.1",
     "typescript": "5.6"
-  },
-  "dependencies": {
-    "@opencode-ai/plugin": "1.18.27"
   }
 }

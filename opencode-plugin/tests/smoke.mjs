@@ -29,6 +29,7 @@ await hooks.config(fakeConfig)
 const injected = fakeConfig.provider?.["prompt-demux"]
 assert.ok(injected, "config hook must inject the prompt-demux provider")
 assert.ok(injected.models.auto, "prompt-demux/auto model must exist")
+assert.ok(injected.models["effort"], "per-mode models must exist")
 assert.ok(injected.models["balanced"], "per-mode models must exist")
 assert.ok(injected.models["frontier-value"], "per-mode models must exist")
 assert.ok(injected.models["free-optimal"], "per-mode models must exist")
@@ -60,26 +61,26 @@ const ref = (s) => {
 }
 const lastExtra = () => logs[logs.length - 1].extra
 
-// 1. classifier path: closures -> MEDIUM -> balanced MEDIUM (opencode/deepseek-v4-pro)
+// 1. classifier path: closures -> MEDIUM -> effort MEDIUM (gemini-3.8-flash@high)
 let r = await route("Explain closures in JavaScript")
-assert.deepStrictEqual(r.model, ref("opencode/deepseek-v4-pro"))
+assert.deepStrictEqual(r.model, { providerID: "opencode", modelID: "gemini-3.8-flash", variant: "high" })
 assert.strictEqual(lastExtra().source, "classifier")
 assert.strictEqual(lastExtra().cacheHit, false)
 
 // 2. cache: same query again -> cacheHit, same result
 r = await route("Explain closures in JavaScript")
-assert.deepStrictEqual(r.model, ref("opencode/deepseek-v4-pro"))
+assert.deepStrictEqual(r.model, { providerID: "opencode", modelID: "gemini-3.8-flash", variant: "high" })
 assert.strictEqual(lastExtra().cacheHit, true, "second identical query should hit cache")
 
 // 3. tier override + prefix stripping (no classifier call)
 r = await route("!hard refactor this monolith now")
-assert.deepStrictEqual(r.model, ref("opencode/kimi-k3"))
+assert.deepStrictEqual(r.model, { providerID: "opencode", modelID: "gemini-3.8-flash", variant: "max" })
 assert.strictEqual(r.visibleText, "refactor this monolith now", "override prefix must be stripped from model-visible text")
 assert.strictEqual(lastExtra().source, "override")
 
 // 4. zero-cost heuristic: greeting skips classifier
 r = await route("thanks!")
-assert.deepStrictEqual(r.model, ref("opencode/glm-5.3-flash"))
+assert.deepStrictEqual(r.model, { providerID: "opencode", modelID: "gemini-3.8-flash", variant: "low" })
 assert.strictEqual(lastExtra().source, "heuristic")
 assert.strictEqual(r.visibleText, "thanks!")
 
@@ -90,33 +91,26 @@ const toolCtx = {
   metadata: () => {}, ask: async () => {},
 }
 const listResult = await hooks.tool.router.execute({ action: "list" }, toolCtx)
+assert.match(listResult, /effort/)
 assert.match(listResult, /balanced/)
 assert.match(listResult, /frontier-value/)
 assert.match(listResult, /free-optimal/)
-assert.match(listResult, /activeMode: balanced/)
+assert.match(listResult, /activeMode: effort/)
 
 // 5b. free-optimal mode routes through the opencode/ (Zen) provider, no openrouter
 r = await route("!mode:free-optimal Explain closures in JavaScript")
 assert.strictEqual(lastExtra().mode, "free-optimal")
 assert.deepStrictEqual(r.model, ref("opencode/muse-spark-1.2-contributor-free"))
 
-// 6. session mode override: !mode:frontier-value sticks for the session
-r = await route("!mode:frontier-value What time is it?")
+// 6. session mode override: !mode:balanced sticks for the session
+r = await route("!mode:balanced What time is it?")
 assert.deepStrictEqual(r.model, ref("opencode/glm-5.3-flash"))
-r = await route("Explain closures in JavaScript") // cached MEDIUM -> frontier-value MEDIUM
-assert.deepStrictEqual(r.model, ref("opencode/gemini-3.8-flash"), "session mode override should stick")
+r = await route("Explain closures in JavaScript") // cached MEDIUM -> balanced MEDIUM
+assert.deepStrictEqual(r.model, ref("opencode/deepseek-v4-pro"), "session mode override should stick")
 
-// 7. bad mode name falls back to the config's activeMode (balanced)
+// 7. bad mode name falls back to the config's activeMode (effort)
 r = await route("!mode:does-not-exist Implement a distributed consensus algorithm")
-assert.deepStrictEqual(r.model, ref("opencode/kimi-k3"), "bad mode -> activeMode (balanced); query classifies HARD")
-
-// 7b. effort mode: same model, variant hops per tier (@low/@high/@max)
-r = await route("!mode:effort thanks!")
-assert.deepStrictEqual(r.model, { providerID: "opencode", modelID: "gemini-3.8-flash", variant: "low" }, "effort EASY -> gemini@low")
-r = await route("!mode:effort Explain closures in JavaScript")
-assert.deepStrictEqual(r.model, { providerID: "opencode", modelID: "gemini-3.8-flash", variant: "high" }, "effort MEDIUM -> gemini@high")
-r = await route("!mode:effort Implement a distributed consensus algorithm")
-assert.deepStrictEqual(r.model, { providerID: "opencode", modelID: "gemini-3.8-flash", variant: "max" }, "effort HARD -> gemini@max")
+assert.deepStrictEqual(r.model, { providerID: "opencode", modelID: "gemini-3.8-flash", variant: "max" }, "bad mode -> activeMode (effort); query classifies HARD")
 
 // 8. non-prompt-demux selection = routing OFF (plugin must not touch the model)
 {

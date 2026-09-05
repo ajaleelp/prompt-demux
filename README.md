@@ -89,8 +89,8 @@ flowchart TD
     C --> H["Active mode mapping"]
     E --> H
     G --> H
-    H --> I["balanced: EASY->glm-5.3-flash / MEDIUM->deepseek-v4-pro / HARD->kimi-k3"]
-    H --> I2["effort: gemini-3.8-flash@low / @high / @max (one model, dialed effort)"]
+    H --> I["effort (default): gemini-3.8-flash@low / @high / @max - cache stays warm"]
+    H --> I2["balanced (opt-in): EASY->glm-5.3-flash / MEDIUM->deepseek-v4-pro / HARD->kimi-k3"]
     I --> K["OpenCode calls the dialed model + effort"]
     I2 --> K
     H --> J["Free tier / budget pool / premium - your choice"]
@@ -105,38 +105,55 @@ confidence=0.99`) and cached — repeated queries cost 0 ms.
 
 | Scenario | Result |
 |---|---|
-| "thanks" | heuristic → EASY → glm-5.3-flash (0 ms) |
-| "Explain closures in JavaScript" | classifier → MEDIUM → deepseek-v4-pro (balanced) / gemini-3.8-flash@high (effort) |
-| "Implement a distributed consensus algorithm" | classifier → HARD → kimi-k3 (balanced) / gemini-3.8-flash@max (effort) |
-| `!hard ...` prefix | override → HARD model, prefix stripped from model-visible text |
-| `!mode:frontier-value ...` | mode override, sticks for the session |
+| "thanks" | heuristic → EASY → gemini-3.8-flash@low (0 ms) |
+| "Explain closures in JavaScript" | classifier → MEDIUM → gemini-3.8-flash@high |
+| "Implement a distributed consensus algorithm" | classifier → HARD → gemini-3.8-flash@max |
+| `!hard ...` prefix | override → HARD target, prefix stripped from model-visible text |
+| `!mode:balanced ...` | switch to model-hopping mode, sticks for the session |
 | effort mode (`@low/@high/@max`) | same model, reasoning-effort variant merged into the request (verified live) |
 | Task-tool subagent | dialed **per its own task complexity** (child sessions flow through the same hook) |
 | plugin off (`--pure`) | nominal model used (control test) |
 
 ## The cost math
 
-Using the author's default config on the `opencode/` provider (Zen pricing,
-per answer) — effort dialing and model hopping; swap in your own models and
-the numbers change, but the *shape* stays:
+Using the default `effort` mode on the `opencode/` provider (Zen pricing,
+per answer) — one model, reasoning effort dialed per tier. Swap in your own
+models/efforts and the numbers change, but the *shape* stays:
 
-| Query | Dialed target | Cost | Un-dialed (max effort premium) | Savings |
+| Query | Dialed target | Cost | Un-dialed (max effort, every query) | Savings |
 |---|---|---|---|---|
-| "Reply with exactly: OK" (EASY) | glm-5.3-flash | ~$0.00002 | ~$0.50 | **~99%** |
-| "Explain closures..." (MEDIUM) | deepseek-v4-pro | ~$0.001 | ~$0.50 | ~99% |
-| "Implement distributed consensus" (HARD) | kimi-k3 / claude-fable-5-1@max | premium | premium | by design |
+| "Reply with exactly: OK" (EASY) | gemini-3.8-flash@low | ~$0.00002 | ~$0.02 | **~99%** |
+| "Explain closures..." (MEDIUM) | gemini-3.8-flash@high | ~$0.002 | ~$0.02 | ~90% |
+| "Implement distributed consensus" (HARD) | gemini-3.8-flash@max | premium | premium | by design |
 
 Illustrative session mix (70% EASY / 20% MEDIUM / 10% HARD, ~150-token
-prompts): dialing EASY to something cheap/effort-low and keeping HARD at max
-effort yields roughly **3–6× more premium budget remaining** vs sending
-everything to the max-effort premium model — the difference between topping
-up weekly and monthly. Your mix will differ; the point is the *shape*: most
-chat is EASY, and EASY shouldn't burn premium credits or reasoning tokens.
+prompts): dialing EASY to `@low` and HARD to `@max` on one warm model yields
+roughly **3–6× fewer reasoning tokens spent** vs max-effort on everything —
+and because the model never changes, the prompt cache stays warm turn after
+turn. Your mix will differ; the point is the *shape*: most chat is EASY, and
+EASY shouldn't burn reasoning tokens or cold cache.
 
 Add free tiers (an `…:free` variant or the `opencode/…-free` models) as your
 EASY target and the floor drops to $0.00.
 
 ## Quickstart
+
+### Option A — from npm (recommended)
+
+```bash
+opencode plug opencode-effort-demux --global
+```
+
+This installs the plugin globally (auto-fetched by Bun into OpenCode's plugin
+cache). Then configure your dial in `~/.config/opencode/prompt-demux.json`.
+
+### Option B — clone & run
+
+```bash
+git clone https://github.com/ajaleelp/prompt-demux
+cd prompt-demux
+./scripts/setup.sh          # add -y to skip the confirmation prompt
+```
 
 ### Prerequisites
 
@@ -240,31 +257,22 @@ project-level `prompt-demux.json` (if present) still takes precedence.
 ## Configuration
 
 **This is the whole point.** `prompt-demux.json` is read on every message (no
-restart) and maps the three complexity tiers to whatever models *you* want.
-The config below is the author's default (works with a free OpenCode Zen
-sign-in) — feel free to rip it apart and make it yours.
+restart) and maps the three complexity tiers to whatever effort/models *you*
+want. The default mode — `effort` — keeps things cache-friendly; the model-
+hopping modes are opt-in. Rip it apart and make it yours.
+
+The default config (one model, effort dialed per tier — the cache-friendly
+default):
 
 ```jsonc
 {
-  "activeMode": "balanced",
+  "activeMode": "effort",
   "modes": {
-    "balanced": {
-      "description": "OpenCode-native value picks: GLM Flash absorbs trivial, DeepSeek moderate, Kimi hard",
-      "EASY":   "opencode/glm-5.3-flash",          // all-round entry model, 1.3M ctx
-      "MEDIUM": "opencode/deepseek-v4-pro",        // strong agentic coding
-      "HARD":   "opencode/kimi-k3"                 // near-frontier reasoning
-    },
-    "frontier-value": {
-      "description": "Best value per tier on tuned/high-end models",
-      "EASY":   "opencode/glm-5.3-flash",
-      "MEDIUM": "opencode/gemini-3.8-flash",       // fast + strong agentic
-      "HARD":   "opencode/claude-fable-5-1"        // top of the intelligence index
-    },
-    "free-optimal": {
-      "description": "Zero-cost via OpenCode Zen free tier",
-      "EASY":   "opencode/mimo-v2.5-free",
-      "MEDIUM": "opencode/muse-spark-1.2-contributor-free",
-      "HARD":   "opencode/muse-spark-1.3-contributor-free"
+    "effort": {
+      "description": "One model, effort dialed per tier - keeps the prompt cache warm",
+      "EASY":   "opencode/gemini-3.8-flash@low",    // low reasoning effort
+      "MEDIUM": "opencode/gemini-3.8-flash@high",   // push harder
+      "HARD":   "opencode/gemini-3.8-flash@max"     // go all in
     }
   },
   "classifier": { "url": "http://127.0.0.1:8010/classify", "timeoutMs": 2000 }
@@ -273,9 +281,42 @@ sign-in) — feel free to rip it apart and make it yours.
 
 **All default refs are `opencode/…`** — the built-in provider, no third-party
 gateway. You only need a free [OpenCode Zen](https://opencode.ai/zen) account
-(via `/connect` → OpenCode Zen). The `free-optimal` mode's models rotate as
-OpenCode deprecates them — adjust refs to the current list in
-`opencode models`.
+(via `/connect` → OpenCode Zen).
+
+**Why effort-first?** Switching reasoning effort on the *same model* preserves
+the provider's prompt cache (cache is keyed per model), so you pay for
+reasoning tokens, not cold cache misses. Switching *models* invalidates the
+cache — powerful, but expensive in warm sessions. So model hopping lives
+behind a deliberate choice.
+
+### Model hopping is opt-in
+
+Prefer a different model per tier? Same dial, different knob — just swap the
+`provider/model` string. Use it when you care more about capability-spread
+across vendors than cache warmth:
+
+```jsonc
+{
+  "activeMode": "balanced",
+  "modes": {
+    "balanced": {
+      "description": "Cross-provider value picks",
+      "EASY":   "opencode/glm-5.3-flash",
+      "MEDIUM": "opencode/deepseek-v4-pro",
+      "HARD":   "opencode/kimi-k3"
+    },
+    "frontier-value": {
+      "description": "Higher quality per tier",
+      "EASY":   "opencode/glm-5.3-flash",
+      "MEDIUM": "opencode/gemini-3.8-flash",
+      "HARD":   "opencode/claude-fable-5-1"
+    }
+  }
+}
+```
+
+Both hops can coexist — mix `provider/model` and `provider/model@variant`
+refs freely across modes.
 
 ### OpenRouter? Just my defaults are OpenRouter... make it work either way
 
@@ -291,19 +332,19 @@ The full OpenRouter variant of the default config:
 
 ```jsonc
 {
-  "activeMode": "balanced",
+  "activeMode": "effort",
   "modes": {
+    "effort": {
+      "description": "One model, effort dialed per tier, via OpenRouter",
+      "EASY":   "openrouter/z-ai/glm-5.3-flash@low",
+      "MEDIUM": "openrouter/z-ai/glm-5.3-flash@high",
+      "HARD":   "openrouter/z-ai/glm-5.3-flash@max"
+    },
     "balanced": {
-      "description": "Cross-provider value picks (OpenRouter)",
+      "description": "Cross-provider value picks, via OpenRouter",
       "EASY":   "openrouter/z-ai/glm-5.3-flash",
       "MEDIUM": "openrouter/deepseek/deepseek-v4-pro-0813",
       "HARD":   "openrouter/moonshotai/kimi-k3"
-    },
-    "frontier-value": {
-      "description": "Best value per tier, via OpenRouter",
-      "EASY":   "openrouter/z-ai/glm-5.3-flash",
-      "MEDIUM": "openrouter/google/gemini-3.8-flash",
-      "HARD":   "openrouter/anthropic/claude-fable-5.1"
     }
   }
 }
@@ -312,12 +353,12 @@ The full OpenRouter variant of the default config:
 Model refs are `provider/model` (split on the **first** slash, so OpenRouter
 slugs like `openrouter/anthropic/claude-fable-5.1` work as-is).
 
-### Effort hopping (`provider/model@variant`) — a headline feature
+### Effort hopping (`provider/model@variant`) — how it works
 
-Effort is the first-class dial: a tier can map to *the same model at different
-reasoning efforts*, instead of switching models. This is the preferred 2026
-pattern for keeping provider prompt caches warm — you pay for reasoning
-tokens, not cache misses.
+Effort is the first-class dial: a tier maps to *the same model at different
+reasoning efforts*, instead of switching models. End a ref with `@variant`
+and OpenCode merges that model's named variant (reasoning effort / thinking
+budget) into the request for that message:
 
 ```json
 "effort": {
@@ -328,8 +369,6 @@ tokens, not cache misses.
 }
 ```
 
-End a ref with `@variant` and OpenCode merges that model's named variant
-(reasoning effort / thinking budget) into the request for that message.
 Variants come from OpenCode's built-in defaults (e.g. Anthropic `high`/`max`,
 OpenAI `none`/…/`xhigh`, Google `low`/`high`), or you can define your own per
 model in `opencode.json`:
@@ -343,22 +382,6 @@ model in `opencode.json`:
 A plain `provider/model` ref works too (default effort) — the `@variant`
 suffix is optional. Verified end-to-end: the chosen variant's options are
 merged into both the main and auxiliary (title) requests.
-
-### Model hopping (`provider/model`) — switch models per tier
-
-Prefer different models per tier (cost / capability split across vendors)?
-That's the same dial — just swap the `provider/model` string:
-
-```json
-"balanced": {
-  "EASY":   "opencode/glm-5.3-flash",   // trivial: greetings, thanks, small questions
-  "MEDIUM": "opencode/deepseek-v4-pro", // typical dev tasks
-  "HARD":   "opencode/kimi-k3"          // hard problems: architecture, debugging at scale
-}
-```
-
-Both hops can coexist — mix `provider/model` and `provider/model@variant`
-refs freely across modes.
 
 ### Configuring your routes (the part that's *yours*)
 
@@ -420,7 +443,7 @@ prompt-demux/
 │   └── model/                 # downloaded weights (git-ignored)
 ├── opencode-plugin/           # TypeScript side
 │   ├── src/lib.ts             # pure helpers (parsing, config, heuristics)
-│   ├── src/main.ts            # chat.message hook + router tool
+│   ├── src/main.ts            # chat.message hook (dial model+effort) + router tool
 │   └── tests/                 # unit tests (node:test) + smoke test
 ├── scripts/
 │   ├── setup.sh               # one-command install (venv, model, shim, server)

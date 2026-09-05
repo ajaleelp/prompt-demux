@@ -30,8 +30,15 @@ export type Classification = {
 export const TIERS: Tier[] = ["EASY", "MEDIUM", "HARD"]
 
 export const DEFAULT_CONFIG: RouterConfig = {
-  activeMode: "balanced",
+  activeMode: "effort",
   modes: {
+    effort: {
+      description:
+        "One model, effort dialed per tier (@low/@high/@max) - keeps the prompt cache warm",
+      EASY: "opencode/gemini-3.8-flash@low",
+      MEDIUM: "opencode/gemini-3.8-flash@high",
+      HARD: "opencode/gemini-3.8-flash@max",
+    },
     balanced: {
       description:
         "OpenCode-native value picks: GLM Flash absorbs trivial, DeepSeek moderate, Kimi hard",
@@ -50,13 +57,6 @@ export const DEFAULT_CONFIG: RouterConfig = {
       EASY: "opencode/mimo-v2.5-free",
       MEDIUM: "opencode/muse-spark-1.2-contributor-free",
       HARD: "opencode/muse-spark-1.3-contributor-free",
-    },
-    effort: {
-      description:
-        "One model, effort dialed per tier (@low/@high/@max) - keeps the prompt cache warm",
-      EASY: "opencode/gemini-3.8-flash@low",
-      MEDIUM: "opencode/gemini-3.8-flash@high",
-      HARD: "opencode/gemini-3.8-flash@max",
     },
   },
 }
