@@ -24,11 +24,7 @@
 >    task complexity — a failure is evidence the *current attempt* isn't
 >    resolving, not that the task itself is complex. Treating failures as
 >    complexity inflates tiers on trivial-but-failing work.
-> 5. **The root cause may be harness misuse, not routing.** Long-running
->    single threads cause context bloat, quality degradation, and lossy
->    compaction. The industry answer to that is short focused threads +
->    subagents, not a better model selector. Until we validate session hygiene
->    as the fix, a router is polishing the wrong layer.
+> 5. **The longer context is a tradeoff, not a sickness — and the fix may be harness discipline, not routing.** Long-running single threads get real praise from heavy users (continuity of decisions, ~95–98% prompt-cache hits making volume cheap). But the engineering consensus (Anthropic, OpenAI docs) is that context rot is real and compounding, compaction is lossy, and those cheap long threads only stay cheap *while* the cache stays warm. The synthetic best practice is a **hybrid**: one long thread per connected execution phase (cache-stable, proactive `/compact <focus>`), write the plan to a file and start fresh to execute, and fresh-context subagents for review. Until we validate harness discipline against routing, a model selector is polishing the wrong layer.
 
 # prompt-demux
 
