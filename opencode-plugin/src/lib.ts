@@ -116,7 +116,8 @@ export const JEV_QUESTIONS = {
     type: "choice",
     instructions:
       "How much reasoning effort should the model apply to answer `message` right now, given `prior`, `last_turn` and " +
-      "the task's difficulty? Short follow-ups inherit the effort of the work in progress; a trivial aside during a hard task is still EASY.",
+      "the task's difficulty? An acknowledgement that tells the assistant to proceed with the task in `prior` " +
+      "('ok', 'yes', 'go on', 'continue') needs the effort of that task, not EASY. A trivial aside unrelated to the task is still EASY.",
     criteria: {
       EASY: "No design thinking: greetings, acknowledgements, lookups, trivial edits.",
       MEDIUM: "A well-scoped coding task or explanation: one function or module.",

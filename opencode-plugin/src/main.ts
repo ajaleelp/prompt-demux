@@ -168,15 +168,17 @@ export const PromptDemuxPlugin: Plugin = async ({ client, worktree, directory })
           ? ENV_CLASSIFIER_TIMEOUT
           : config.classifier?.timeoutMs ?? 2000
 
+      const prior = sessionStates.get(input.sessionID)
       let tier: Tier
       let confidence = 1
       let source: "override" | "heuristic" | "classifier" | "fallback"
       let latencyMs = 0
       let cacheHit = false
       let signals: Record<string, unknown> = {}
-      const prior = sessionStates.get(input.sessionID)
 
-      const heuristic = overrides.tier ? null : heuristicTier(overrides.rest || text)
+      // The 0 ms greeting path only runs when no task is in flight: "ok" or "continue" after a
+      // HARD turn carries that task's effort, and only Jev (with the state) can tell.
+      const heuristic = overrides.tier || prior ? null : heuristicTier(overrides.rest || text)
       if (overrides.tier) {
         tier = overrides.tier
         source = "override"

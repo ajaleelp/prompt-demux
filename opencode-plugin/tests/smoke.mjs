@@ -42,10 +42,10 @@ assert.ok(injected.models["frontier-value"], "per-mode models must exist")
 assert.ok(injected.models["free-optimal"], "per-mode models must exist")
 assert.ok(fakeConfig.small_model, "small_model must be redirected away from prompt-demux")
 
-function makeIO(text) {
+function makeIO(text, sessionID = "smoke-session") {
   return {
     input: {
-      sessionID: "smoke-session",
+      sessionID,
       agent: "build",
       model: { providerID: "prompt-demux", modelID: "auto" },
     },
@@ -56,8 +56,8 @@ function makeIO(text) {
   }
 }
 
-async function route(text) {
-  const { input, output } = makeIO(text)
+async function route(text, sessionID) {
+  const { input, output } = makeIO(text, sessionID)
   await hooks["chat.message"](input, output)
   return { model: output.message.model, visibleText: output.parts[0].text }
 }
@@ -91,11 +91,13 @@ assert.deepStrictEqual(r.model, { providerID: "opencode", modelID: "gemini-3.8-f
 assert.strictEqual(r.visibleText, "refactor this monolith now", "override prefix must be stripped from model-visible text")
 assert.strictEqual(lastExtra().source, "override")
 
-// 4. zero-cost heuristic: greeting skips classifier
-r = await route("thanks!")
+// 4. zero-cost heuristic: greeting skips classifier, but only with no task in flight
+r = await route("thanks!", "fresh-session")
 assert.deepStrictEqual(r.model, { providerID: "opencode", modelID: "gemini-3.8-flash", variant: "low" })
 assert.strictEqual(lastExtra().source, "heuristic")
 assert.strictEqual(r.visibleText, "thanks!")
+r = await route("continue") // smoke-session has state -> Jev decides, not the regex
+assert.strictEqual(lastExtra().source, "classifier", "acks during a task must go to Jev")
 
 // 5. router tool: list shows all modes
 const toolCtx = {
