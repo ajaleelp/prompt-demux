@@ -1,13 +1,3 @@
-# Model weights: fetched via download_model.py (see README)
-model/
-
-# Python
-venv/
-.venv/
-__pycache__/
-*.pyc
-.hf_cache/
-
 # Node / plugin (future phases)
 node_modules/
 dist/

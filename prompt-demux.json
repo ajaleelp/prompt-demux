@@ -26,5 +26,5 @@
       "HARD": "opencode/muse-spark-1.3-contributor-free"
     }
   },
-  "classifier": { "url": "http://127.0.0.1:8010/classify", "timeoutMs": 2000 }
+  "classifier": { "timeoutMs": 2000 }
 }

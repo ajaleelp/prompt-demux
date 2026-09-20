@@ -11,8 +11,11 @@ import {
   parseOverrides,
   heuristicTier,
   saveConfig,
+  buildSessionState,
+  jevClassify,
   TIERS,
   type Classification,
+  type SessionState,
   type RouterConfig,
   type Tier,
 } from "./lib.ts"
@@ -23,40 +26,22 @@ const CACHE_MAX = 500
 
 const classificationCache = new Map<string, Classification>()
 
-async function classify(
-  query: string,
-  url: string,
-  timeoutMs: number,
-): Promise<Classification | null> {
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query }),
-      signal: AbortSignal.timeout(timeoutMs),
-    })
-    if (!res.ok) return null
-    const data = (await res.json()) as Classification
-    return TIERS.includes(data.tier) ? data : null
-  } catch {
-    return null
-  }
-}
-
 async function classifyCached(
-  query: string,
-  url: string,
-  timeoutMs: number,
+  state: SessionState,
+  opts: { apiKey: string; url?: string; timeoutMs: number },
 ): Promise<Classification | null> {
-  const hit = classificationCache.get(query)
+  // Same message + same context = same answer. Keyed on the whole state, so "fix it" after
+  // different work is a different entry.
+  const key = JSON.stringify(state)
+  const hit = classificationCache.get(key)
   if (hit) return { ...hit, cacheHit: true }
-  const result = await classify(query, url, timeoutMs)
+  const result = await jevClassify(state, opts)
   if (result) {
     if (classificationCache.size >= CACHE_MAX) {
       const oldest = classificationCache.keys().next().value
       if (oldest !== undefined) classificationCache.delete(oldest)
     }
-    classificationCache.set(query, result)
+    classificationCache.set(key, result)
   }
   return result
 }
@@ -70,6 +55,16 @@ export const PromptDemuxPlugin: Plugin = async ({ client, worktree, directory })
       await client.app.log({ body: { service: "prompt-demux", level, message, extra } })
     } catch {
       /* logging must never break chat */
+    }
+  }
+
+  /** Last few turns of the session, distilled for Jev. Empty state if the SDK call fails. */
+  async function sessionState(sessionID: string, message: string): Promise<SessionState> {
+    try {
+      const res = await client.session.messages({ path: { id: sessionID }, query: { directory } })
+      return buildSessionState(message, (res.data ?? []) as never)
+    } catch {
+      return buildSessionState(message, [])
     }
   }
 
@@ -158,10 +153,7 @@ export const PromptDemuxPlugin: Plugin = async ({ client, worktree, directory })
       const mode = config.modes[modeName]
       if (overrides.mode) sessionModes.set(input.sessionID, modeName)
 
-      const clsUrl =
-        ENV_CLASSIFIER_URL ??
-        config.classifier?.url ??
-        "http://127.0.0.1:8010/classify"
+      const clsUrl = ENV_CLASSIFIER_URL ?? config.classifier?.url
       const clsTimeout =
         Number.isFinite(ENV_CLASSIFIER_TIMEOUT) && ENV_CLASSIFIER_TIMEOUT > 0
           ? ENV_CLASSIFIER_TIMEOUT
@@ -172,6 +164,7 @@ export const PromptDemuxPlugin: Plugin = async ({ client, worktree, directory })
       let source: "override" | "heuristic" | "classifier" | "fallback"
       let latencyMs = 0
       let cacheHit = false
+      let signals: Record<string, number> = {}
 
       const heuristic = overrides.tier ? null : heuristicTier(overrides.rest || text)
       if (overrides.tier) {
@@ -182,17 +175,27 @@ export const PromptDemuxPlugin: Plugin = async ({ client, worktree, directory })
         source = "heuristic"
         confidence = 1
       } else {
-        const result = await classifyCached(overrides.rest || text, clsUrl, clsTimeout)
+        const apiKey = process.env.TYPESAFE_API_KEY
+        const result = apiKey
+          ? await classifyCached(
+              await sessionState(input.sessionID, overrides.rest || text),
+              { apiKey, url: clsUrl, timeoutMs: clsTimeout },
+            )
+          : null
         if (result) {
           tier = result.tier
           confidence = result.confidence
           latencyMs = result.latency_ms
           cacheHit = result.cacheHit ?? false
+          signals = {
+            continuesPriorWork: result.continuesPriorWork,
+            failureIsEnvironmental: result.failureIsEnvironmental,
+          }
           source = "classifier"
         } else {
           tier = "MEDIUM"
           source = "fallback"
-          await log("warn", "classifier unavailable, falling back to MEDIUM")
+          await log("warn", apiKey ? "Jev unavailable, falling back to MEDIUM" : "TYPESAFE_API_KEY not set, falling back to MEDIUM")
         }
       }
 
@@ -228,6 +231,7 @@ export const PromptDemuxPlugin: Plugin = async ({ client, worktree, directory })
         variant: routed.variant,
         source,
         confidence,
+        ...signals,
         classifierLatencyMs: latencyMs,
         cacheHit,
         query: (overrides.rest || text).slice(0, 120),

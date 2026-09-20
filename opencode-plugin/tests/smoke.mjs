@@ -1,5 +1,11 @@
 // Standalone smoke test: exercises the plugin without opencode (plain Node).
-// Requires the classifier server on 127.0.0.1:8010 for classifier-path tests.
+// Requires TYPESAFE_API_KEY (read from ../.env if unset) for classifier-path tests.
+
+import fs from "node:fs"
+if (!process.env.TYPESAFE_API_KEY) {
+  const env = fs.readFileSync(new URL("../../.env", import.meta.url), "utf8")
+  process.env.TYPESAFE_API_KEY = env.match(/^TYPESAFE_API_KEY=(.*)$/m)?.[1].trim()
+}
 
 import assert from "node:assert"
 import { PromptDemuxPlugin } from "../src/main.ts"
@@ -9,6 +15,7 @@ const repoRoot = new URL("../../", import.meta.url).pathname
 const logs = []
 const ctx = {
   client: {
+    session: { messages: async () => ({ data: [] }) },
     app: {
       log: async ({ body }) => {
         logs.push({ level: body.level, message: body.message, extra: body.extra })
@@ -139,8 +146,8 @@ assert.deepStrictEqual(r.model, { providerID: "opencode", modelID: "gemini-3.8-f
 
 // Guard: the classifier path must have been exercised (no fallback warns)
 assert.ok(
-  !logs.some((l) => l.message.includes("classifier unavailable")),
-  "classifier server unreachable - this test exercised the FALLBACK path; start server.py first",
+  !logs.some((l) => l.message.includes("falling back to MEDIUM")),
+  "Jev unreachable or TYPESAFE_API_KEY unset - this test exercised the FALLBACK path",
 )
 
 console.log("SMOKE TEST PASSED (classifier, cache, heuristics, stripping, modes all verified).")

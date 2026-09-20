@@ -1,7 +1,7 @@
 {
   "name": "opencode-effort-demux",
-  "version": "0.1.0",
-  "description": "OpenCode plugin: dial the right reasoning effort (or model) for every prompt via a local CPU classifier. Effort-first, cache-friendly.",
+  "version": "0.2.0",
+  "description": "OpenCode plugin: dial the right reasoning effort (or model) for every prompt via TypeSafe Jev, judged over the session context — not just the message. Effort-first, cache-friendly.",
   "type": "module",
   "main": "./src/main.ts",
   "files": [
@@ -10,7 +10,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/lib.test.ts",
-    "smoke": "node tests/smoke.mjs"
+    "smoke": "node tests/smoke.mjs",
+    "bench": "node tests/jev-bench.mjs"
   },
   "keywords": [
     "opencode",
@@ -21,6 +22,8 @@
     "effort",
     "demux",
     "classifier",
+    "typesafe",
+    "jev",
     "llm"
   ],
   "license": "MIT",

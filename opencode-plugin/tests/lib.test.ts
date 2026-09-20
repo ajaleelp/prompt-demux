@@ -198,3 +198,46 @@ test("saveConfig round-trips through loadConfig", () => {
   assert.equal(error, undefined)
   assert.equal(config.activeMode, "m")
 })
+
+// ---------- buildSessionState ----------
+
+import { buildSessionState } from "../src/lib.ts"
+
+const u = (text: string) => ({ info: { role: "user" as const }, parts: [{ type: "text", text }] })
+const a = (text: string) => ({ info: { role: "assistant" as const }, parts: [{ type: "text", text }] })
+
+test("buildSessionState keeps the last N prior user turns and the last assistant text", () => {
+  const rows = [u("one"), a("r1"), u("two"), a("r2"), u("three"), a("r3"), u("four"), a("r4")]
+  assert.deepStrictEqual(buildSessionState("fix it", rows), {
+    message: "fix it",
+    prior_user_turns: ["two", "three", "four"],
+    last_assistant_outcome: "r4",
+  })
+})
+
+test("buildSessionState drops the current message if already persisted, and surfaces tool errors", () => {
+  const rows = [
+    u("Add tests for login"),
+    {
+      info: { role: "assistant" as const },
+      parts: [
+        { type: "text", text: "running tests" },
+        { type: "tool", tool: "bash", state: { status: "error", error: "ModuleNotFoundError: pytest" } },
+      ],
+    },
+    u("try again"),
+  ]
+  assert.deepStrictEqual(buildSessionState("try again", rows), {
+    message: "try again",
+    prior_user_turns: ["Add tests for login"],
+    last_assistant_outcome: "tool error: bash: ModuleNotFoundError: pytest",
+  })
+})
+
+test("buildSessionState on an empty session is just the message", () => {
+  assert.deepStrictEqual(buildSessionState("hi", []), {
+    message: "hi",
+    prior_user_turns: [],
+    last_assistant_outcome: "",
+  })
+})

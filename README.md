@@ -1,39 +1,60 @@
 <div align="center">
 
-> ## 🛑 STATUS: PAUSED — do not rely on this yet
+> ## What we tried, what we measured, why we moved
 >
-> Development is paused while we reassess the approach. Honest concerns with
-> the current design:
+> **v0.1 shipped a local ModernBERT classifier** (ONNX, CPU, ~31 ms, 750 MB).
+> It worked, but we paused the project over five honest concerns — the two
+> that mattered most:
 >
-> 1. **Per-message complexity classification is a weak proxy.** A short
->    message riding on a huge, complex context — *"fix it"* after 200k tokens
->    of debugging — is classified by the text alone, so it lands on a
->    low-effort tier and the model fumbles. The classifier doesn't see the
->    context it's about to work on.
-> 2. **Heuristic complexity scoring is near-random.** LiteLLM's own benchmark
->    measured a rule-based complexity scorer at **AUC ≈ 0.52** — barely better
->    than a coin flip. Our classifier (ModernBERT fine-tune) is better than
->    that, but the signal quality of "complexity from a single prompt" is a
->    known open problem.
-> 3. **The lightweight model trap is real.** Our own measured accuracy:
->    fp32 ModernBERT 66.7% / int8 ModernBERT 43.3% / heuristic 0%. The int8
->    export is *worse than shipping no model* — it collapses the MEDIUM tier
->    and misdials HARD queries to EASY. There is no free lunch to a lighter
->    model without retraining.
-> 4. **Errors don't mean "hard."** A flaky test or a missing dependency isn't
->    task complexity — a failure is evidence the *current attempt* isn't
->    resolving, not that the task itself is complex. Treating failures as
->    complexity inflates tiers on trivial-but-failing work.
-> 5. **The longer context is a tradeoff, not a sickness — and the fix may be harness discipline, not routing.** Long-running single threads get real praise from heavy users (continuity of decisions, ~95–98% prompt-cache hits making volume cheap). But the engineering consensus (Anthropic, OpenAI docs) is that context rot is real and compounding, compaction is lossy, and those cheap long threads only stay cheap *while* the cache stays warm. The synthetic best practice is a **hybrid**: one long thread per connected execution phase (cache-stable, proactive `/compact <focus>`), write the plan to a file and start fresh to execute, and fresh-context subagents for review. Until we validate harness discipline against routing, a model selector is polishing the wrong layer.
+> 1. **Per-message text is a weak proxy for effort.** *"fix it"* after 200k
+>    tokens of debugging a race condition was classified from the three
+>    words alone and dialed to the cheapest tier. The classifier never saw
+>    the work it was about to dial effort for. No amount of retraining
+>    fixes that — a single-string encoder structurally can't see context.
+> 2. **Lighter models don't come free.** Measured on our labeled set: fp32
+>    ModernBERT **66.7%**, int8 **43.3%** (worse than no model — it
+>    collapsed MEDIUM and sent HARD prompts to EASY). And every change to
+>    the tier definitions meant retraining.
+>
+> **We benchmarked [TypeSafe Jev](https://typesafe.ai) — a System One
+> "decision model" that returns typed judgments over structured state
+> instead of text — against the same set:**
+>
+> | Classifier | Text-only set (30) | Context-dependent turns (6) | Latency |
+> |---|---|---|---|
+> | ModernBERT fp32 (local) | 66.7% | *can't — sees text only* | 31 ms |
+> | ModernBERT int8 (local) | 43.3% | *can't* | 17 ms |
+> | **Jev, judging `{message, prior_user_turns, last_assistant_outcome}`** | **93–97%** | **6/6** | ~365 ms from Asia-Pacific (85–127 ms inference + RTT) |
+>
+> The context-dependent set is the point: `"fix it"` after a README typo →
+> EASY (0.95); `"fix it"` after a failing vector-clock merge → HARD (1.00).
+> `"try again"` after `ModuleNotFoundError: pytest` → MEDIUM with
+> `failure_is_environmental = 0.94` — a flaky environment is no longer
+> mistaken for a hard task. Reproduce it: `npm run bench` in `opencode-plugin/`.
+>
+> **So v0.2 deletes the Python service and the 750 MB model** and dials
+> effort with one Jev call over the session's last few turns. The tier
+> definitions are now three sentences of prose in
+> [`lib.ts`](opencode-plugin/src/lib.ts) — edit them, no retraining.
+>
+> **What it costs, plainly:** the decision is no longer local — your message
+> and the last ~3 turns go to `api.typesafe.ai`; ~10× the latency of the
+> ONNX model (still well under the model call it precedes); a TypeSafe API
+> key. Jev's MEDIUM confidence is soft (0.3–0.6) where EASY/HARD are ≥0.95,
+> so the middle tier is where you'll see it hedge.
+>
+> Concern #5 from the pause — that harness discipline (plan-file + fresh
+> context per phase, `/compact <focus>`) may matter more than any router —
+> is still open. A smarter dial doesn't settle it.
 
 # prompt-demux
 
 **Dial the right amount of effort for every prompt.**
 
-A local, CPU-only classifier that reads each prompt's complexity, then
-**dials the response budget** for it — trivial chats get low effort / a cheap
-model, hard problems get maximum effort / a stronger model. ~31 ms, no GPU,
-no cloud in the decision.
+One typed judgment per message — over the **session state, not just the
+text** — then **dial the response budget** for it: trivial chats get low
+effort / a cheap model, hard problems get maximum effort / a stronger model.
+Powered by [TypeSafe Jev](https://typesafe.ai); ~350 ms, no local model.
 
 **Two knobs, one dial face.** A "route" is `provider/model[@variant]`:
 - *model* — which model handles the request (`opencode/…`, `openrouter/…`, local `ollama/…`)
@@ -49,7 +70,6 @@ third-party gateway. OpenRouter keys? One-line swap (see
 [Configuration](#configuration)).
 
 [![CI](https://github.com/ajaleelp/prompt-demux/actions/workflows/ci.yml/badge.svg)](https://github.com/ajaleelp/prompt-demux/actions)
-[![Python](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org)
 [![Node](https://img.shields.io/badge/node-22%2B-green)](https://nodejs.org)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](#license)
 
@@ -86,10 +106,10 @@ This project exists because "genuinely good" wasn't the same as what I needed:
 | **Effort control** | Server-side, opaque | Local, exact — `@variant` reasoning effort per tier, or per message |
 | **Wallet topology** | One wallet — when it's empty, everything stops | **Multi-wallet runway**: map tiers to different providers/accounts — free tiers for EASY, a separate cheap pool for MEDIUM, premium credits only for HARD |
 | **Top-up economics** | ~5% credit purchase fee on all usage | Most traffic can flow through direct/free channels |
-| **Routing logic** | Server-side, not inspectable | Local ONNX model + your config, fully auditable |
-| **Latency** | adds server-side round trip | ~31 ms on CPU, fully offline |
+| **Routing logic** | Server-side, not inspectable | Jev judgment over tier definitions *you* write in prose + your config — every decision logged with its probabilities |
+| **Latency** | adds server-side round trip | ~350 ms Jev call (≈100 ms inference + RTT), then your model as usual |
 | **Override / steering** | fallback model list | `!easy` `!hard` `!effort:low` `!mode:` prefixes, session-sticky modes |
-| **Setup** | one line | plugin + ~750 MB local model |
+| **Setup** | one line | plugin + a TypeSafe API key |
 
 The killer feature is **credit runway**: when EASY goes to a free tier and
 MEDIUM to a budget model, your premium credits become a *reserve for work
@@ -114,12 +134,17 @@ not. Here's the honest landscape (Sept 2026):
 | [opencode-model-router](https://github.com/marco-jardim/opencode-model-router) (102★) | OpenCode plugin, but **LLM prompt delegation** — an orchestrator re-delegates via subagents | No ML classifier, no local model; costs an LLM round-trip per message; not cache-friendly by design |
 | [opencode-reasoning-effort](https://github.com/Aliancn/opencode-reasoning-effort) | Narrows to one thing: patch `fetch` so `reasoning_effort` reaches the wire | Single-purpose patch; no complexity tiering, no fallback, no config |
 | OpenRouter `auto` / `pareto-code` | Server-side opaque model routing | Not local, not auditable, no per-message effort dial, runs outside OpenCode |
+| [flaviusapop/jev-router](https://github.com/flaviusapop/jev-router), [prismhq/jev-router](https://github.com/prismhq/jev-router), [blablanumerodeux/model-router](https://github.com/blablanumerodeux/model-router) | Jev-powered routers — **proxies** in front of Claude Code / Codex / opencode / LiteLLM | All feed Jev the **message text only** (one author tried adding metadata and found it lowered confidence). A proxy can't see the session; this plugin runs in-process and feeds Jev the last turns + last tool outcome, which is what flips `"fix it"` between EASY and HARD |
 
-The combination that's unoccupied: **in-process OpenCode plugin + local ML
-classifier + effort-first dialing (same model, `@low/@high/@max`) + cache
-stickiness** — so the prompt cache never breaks. A proxy can't see
-OpenCode's per-message effort state; an LLM-delegation plugin spends more and
-can't guarantee cache warmth. That's the square this project sits in.
+The combination that's unoccupied: **in-process OpenCode plugin +
+session-state-aware Jev judgment + effort-first dialing (same model,
+`@low/@high/@max`) + cache stickiness** — so the prompt cache never breaks
+and short follow-ups inherit the difficulty of the work in progress. A proxy
+can't see OpenCode's session or per-message effort state; an LLM-delegation
+plugin spends more and can't guarantee cache warmth. Text-only Jev routers
+top out at the ~76% ceiling every text-only classifier hits
+([independent benchmark](https://dev.classmethod.jp/en/articles/jev-for-llm-model-routing/)).
+That's the square this project sits in.
 
 ## What it does
 
@@ -129,8 +154,9 @@ flowchart TD
     B -- "!easy / !hard / !effort:x / !mode:" --> C["Force tier, effort, or mode"]
     B -- no --> D{"Zero-cost heuristics"}
     D -- "greetings, acks" --> E["EASY - 0 ms"]
-    D -- "real query" --> F["Local classifier - ModernBERT ONNX - CPU - ~31 ms"]
-    F --> G{"tier + confidence"}
+    D -- "real query" --> S["Last ~3 user turns + last assistant/tool outcome"]
+    S --> F["TypeSafe Jev - one call, 3 typed questions - ~350 ms"]
+    F --> G{"tier + confidence + continues_prior_work + failure_is_environmental"}
     C --> H["Active mode mapping"]
     E --> H
     G --> H
@@ -144,7 +170,8 @@ flowchart TD
 ```
 
 Every decision is logged (`dialed HARD -> .../kimi-k3@max source=classifier
-confidence=0.99`) and cached — repeated queries cost 0 ms.
+confidence=0.99 continuesPriorWork=0.95`) and cached on *message + context* —
+the same follow-up after the same work costs 0 ms.
 
 ## Verified behavior (live E2E on OpenCode 1.18.x, with the author's default routes)
 
@@ -202,14 +229,15 @@ cd prompt-demux
 
 ### Prerequisites
 
-- **Python 3.9+** (the classifier runs 100% locally on CPU)
 - **Node 22+** (for the plugin SDK)
+- A **[TypeSafe](https://typesafe.ai) API key**, exported as `TYPESAFE_API_KEY`
+  in the environment OpenCode runs in. Without it every message dials MEDIUM
+  (with a warning) — chat never breaks.
 - An **OpenCode** install. A free
   [OpenCode Zen](https://opencode.ai/zen) sign-in unlocks `opencode/…`
   models (the default); the `free-optimal` mode's free models need no billing
   beyond the Zen sign-in. If you prefer OpenRouter, any existing key works
-  with `openrouter/…` refs instead. No Hugging Face account is required —
-  the classifier model is served from a public repo.
+  with `openrouter/…` refs instead.
 
 ### One-command setup (recommended)
 
@@ -221,15 +249,9 @@ cd prompt-demux
 
 **What it does in the background, before you confirm it:**
 
-1. Creates a Python venv and installs the classifier deps
-   (`onnxruntime`, `fastapi`, `uvicorn`, …).
-2. **Downloads the classifier model from Hugging Face** (~750 MB fp32 +
-   int8 variants, SHA-verified) into `classifier-service/model/`.
-3. Runs `npm install` in `opencode-plugin/` (pulls `@opencode-ai/plugin`).
-4. Installs the **global** plugin shim + default config at
+1. Runs `npm install` in `opencode-plugin/` (pulls `@opencode-ai/plugin`).
+2. Installs the **global** plugin shim + default config at
    `~/.config/opencode/` so routing works in every project.
-5. Starts the classifier server on `http://127.0.0.1:8010` (nohup, log at
-   `/tmp/prompt-demux-classifier.log`).
 
 That's the whole setup. Restart OpenCode (full quit), pick **Prompt Demux Auto**
 from the dropdown, and prompts get dialed automatically. Verify from the CLI:
@@ -239,28 +261,9 @@ opencode run -m prompt-demux/auto "thanks" --print-logs | grep -E "dialed|routed
 # ... dialed EASY -> opencode/glm-5.3-flash source=heuristic
 ```
 
-### What each piece does (manual, if you prefer the pieces separately)
+### Manual, if you prefer
 
-Prefer to run the classifier service yourself (screen/tmux/launchd)? Then:
-
-```bash
-cd classifier-service
-python3 -m venv venv
-venv/bin/pip install -r requirements.txt
-venv/bin/python download_model.py     # ~750 MB, SHA-verified -> ./model/
-venv/bin/python server.py             # serves 127.0.0.1:8010
-```
-
-Test it:
-
-```bash
-curl -s -X POST http://127.0.0.1:8010/classify \
-  -H 'Content-Type: application/json' \
-  -d '{"query":"Explain closures in JavaScript"}'
-# {"tier":"MEDIUM", "confidence":0.84, "latency_ms":29.7, ...}
-```
-
-And the plugin separately:
+Just the plugin:
 
 ```bash
 cd opencode-plugin && npm install && cd ..
@@ -320,9 +323,13 @@ default):
       "HARD":   "opencode/gemini-3.8-flash@max"     // go all in
     }
   },
-  "classifier": { "url": "http://127.0.0.1:8010/classify", "timeoutMs": 2000 }
+  "classifier": { "timeoutMs": 2000 }   // Jev call budget; on timeout -> MEDIUM
 }
 ```
+
+`classifier.url` (or `PROMPT_DEMUX_CLASSIFIER_URL`) overrides the Jev endpoint
+— handy for a proxy or a stub in tests. The key is only ever read from
+`TYPESAFE_API_KEY`.
 
 **All default refs are `opencode/…`** — the built-in provider, no third-party
 gateway. You only need a free [OpenCode Zen](https://opencode.ai/zen) account
@@ -481,17 +488,13 @@ The plugin registers a `router` tool — in chat, just ask:
 
 ```
 prompt-demux/
-├── classifier-service/        # Python side
-│   ├── classifier.py          # QueryComplexityClassifier (ONNX CPU)
-│   ├── server.py              # FastAPI /classify on 127.0.0.1:8010
-│   ├── download_model.py      # fetches ONNX weights (SHA-verified)
-│   └── model/                 # downloaded weights (git-ignored)
-├── opencode-plugin/           # TypeScript side
-│   ├── src/lib.ts             # pure helpers (parsing, config, heuristics)
+├── opencode-plugin/
+│   ├── src/lib.ts             # pure helpers: parsing, config, heuristics,
+│   │                          #   buildSessionState() + jevClassify() + the tier prose
 │   ├── src/main.ts            # chat.message hook (dial model+effort) + router tool
-│   └── tests/                 # unit tests (node:test) + smoke test
+│   └── tests/                 # unit tests (node:test), smoke test, jev-bench
 ├── scripts/
-│   ├── setup.sh               # one-command install (venv, model, shim, server)
+│   ├── setup.sh               # one-command install (deps + shim)
 │   └── install-global.sh      # global plugin shim + default config
 ├── .opencode/plugins/prompt-demux.ts   # shim OpenCode auto-loads
 └── prompt-demux.json                    # dialing modes config
@@ -503,43 +506,29 @@ prompt-demux/
 cd opencode-plugin
 npm install
 npx tsc --noEmit
-node --test tests/lib.test.ts    # 19 unit tests
-node tests/smoke.mjs             # integration (needs classifier running)
+node --test tests/lib.test.ts    # 23 unit tests (pure helpers, session-state builder)
+node tests/smoke.mjs             # integration against live Jev (needs TYPESAFE_API_KEY)
+node tests/jev-bench.mjs         # accuracy benchmark, text-only + context-dependent sets
 ```
 
-Accuracy benchmark (fp32 vs int8 vs heuristic, labeled 30-query set):
+## Benchmarks
 
-```bash
-classifier-service/venv/bin/python classifier-service/tests/accuracy_bench.py
-```
+**Jev** (`npm run bench`, Sept 2026, from Asia-Pacific):
 
-## Benchmarks (Intel i7-9750H, CPU only)
+| Set | Result | Median latency |
+|---|---|---|
+| 30 text-only prompts (10/tier) | 28–29 / 30 (93–97%; the misses are EASY↔MEDIUM on genuinely ambiguous prompts, conf ≤0.6) | 365 ms |
+| 6 context-dependent follow-ups (`fix it`, `continue`, `try again`, `why`) | 6 / 6 | 368 ms |
 
-**Latency** (classifier service):
+Of that latency, Jev's own inference is 85–127 ms (`x-envoy-upstream-service-time`);
+the rest is distance to their region. Python `urllib` without keep-alive
+measured ~900 ms — the plugin runs under Bun, which reuses connections.
 
-| Variant | Median latency | Notes |
-|---------|---------------|-------|
-| ONNX fp32 | ~31 ms | **chosen** — best label quality |
-| ONNX int8 | ~17 ms | faster but misclassifies HARD queries |
-
-**Accuracy — what happens if we go lighter?** Measured on a labeled 30-query
-set (10 per tier), exact tier-match:
-
-| Option | Size | Accuracy | The real cost |
-|---|---|---|---|
-| fp32 ModernBERT (service) | 571 MB | **66.7%** | reference |
-| int8 ModernBERT | 144 MB | **43.3%** | ❌ collapses MEDIUM (0% recall) and misdials 7 HARD queries→EASY |
-| heuristic only (no model) | 0 MB | 56.7% | misses ~half the HARD set (→MEDIUM) |
-
-The sobering finding: **the int8 quantized model is the *worst* option —
-worse than shipping no model at all.** It drops the entire MEDIUM class and
-labels hard architecture/consensus prompts "EASY", which would send them to
-the cheapest tier. This is why the README's "eventual in-process classifier"
-should **not** just swap in the current int8 export: it needs either fp32
-(which is heavy) or a *re-trained* small model (e.g. MiniLM) benchmarked to
-roughly match fp32 before it's worth shipping. Until then, the defensive
-position is the current one: fp32 behind the service, heuristic as the
-always-on fallback.
+**The ModernBERT numbers it replaced** (same 30-prompt set, Intel i7-9750H):
+fp32 66.7% @ 31 ms · int8 43.3% @ 17 ms · heuristic-only 56.7%. The int8
+export collapsed MEDIUM entirely and sent 7 HARD prompts to EASY. That code
+lives in git history up to
+[`543f197`](https://github.com/ajaleelp/prompt-demux/tree/543f197/classifier-service).
 
 ## Design notes & honest findings
 
@@ -550,36 +539,43 @@ always-on fallback.
   confirmed against stored sessions).
 - **Subagents are better than "inherited"**: child Task-tool sessions flow
   through the same hook, so each subagent gets routed per its own subtask.
-- **Classifier quirk**: it rates "**Write** a distributed consensus
-  algorithm" as EASY but "**Implement** one" as HARD — verb choice dominates
-  its embeddings. Threshold tuning is a Phase 5 candidate.
-- **Fallback chain**: heuristic (0 cost) → cached classifier → classifier →
-  MEDIUM on failure. Chat never breaks because the classifier is down.
+- **What Jev sees**: `{message, prior_user_turns (last 3, 300 chars each),
+  last_assistant_outcome}` — the last outcome is the most recent tool error
+  if there was one, else the assistant's last text. Three questions go in one
+  request: the tier (`choice`), `continues_prior_work` and
+  `failure_is_environmental` (both `noul`, i.e. calibrated yes/no). The two
+  signals are logged, not yet acted on.
+- **Jev's MEDIUM is soft.** EASY/HARD come back at ≥0.95; MEDIUM sits at
+  0.3–0.7, same as the [independent benchmark](https://dev.classmethod.jp/en/articles/jev-for-llm-model-routing/)
+  found. Expect hedging on "explain this briefly"-shaped prompts.
+- **Fallback chain**: `!override` → heuristic (0 cost) → cached Jev → Jev →
+  MEDIUM on failure/no key. Chat never breaks because the classifier is down.
 
 ## Troubleshooting
 
 - **Plugin doesn't load** — the shim must be at `.opencode/plugins/`
   (plural). Run opencode with `--print-logs`; plugin errors appear at startup.
-- **Everything routes MEDIUM with a warning** — classifier service is down.
-  Start it or raise `classifier.timeoutMs`.
-- **Port 8010 busy** — `lsof -ti :8010 | xargs kill`, then restart.
-- **Python 3.9 wheels** — `onnxruntime` is pinned `<1.20` for cp39
-  compatibility; don't bump it on Python 3.9.
+- **Everything routes MEDIUM with a warning** — `TYPESAFE_API_KEY` isn't
+  visible to OpenCode (check the log line: it says which), or Jev timed out.
+  Export the key in the shell that launches OpenCode, or raise
+  `classifier.timeoutMs`.
 
 ## Roadmap
 
-- [x] Local classifier service (Phase 1)
-- [x] OpenCode plugin: `chat.message` routing, multi-mode config, `router` tool (Phase 2)
-- [x] Prefix stripping, classification cache, greeting heuristics, subagent routing (Phase 3)
-- [x] Config polish, unit tests, docs (Phase 4)
-- [ ] Confidence thresholds + per-tier calibration
-- [ ] Publish to npm as a portable plugin
+- [x] Local ModernBERT classifier service (v0.1, removed)
+- [x] OpenCode plugin: `chat.message` routing, multi-mode config, `router` tool
+- [x] Prefix stripping, classification cache, greeting heuristics, subagent routing
+- [x] Session-state-aware Jev classification; delete the local model (v0.2)
+- [ ] Act on the signals: inherit the previous tier when `continues_prior_work` is high; don't inflate on `failure_is_environmental`
+- [ ] A larger context-dependent benchmark built from real OpenCode session transcripts
+- [ ] Confidence thresholds for the soft MEDIUM tier
 
 ## Follow along
 
 Built in public, phase by phase — each phase is a tagged commit:
 
-- `v0.1.0` — classifier + plugin + modes + tests (this release)
+- `v0.1.0` — local ModernBERT classifier + plugin + modes + tests
+- `v0.2.0` — Jev over session state; Python service and model deleted (this release)
 
 Issues and PRs welcome, especially Intel Mac benchmarks from other machines.
 
