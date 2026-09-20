@@ -231,6 +231,11 @@ The ablation is the same model, prompts and questions with `prior` blanked
 every turn. It's the honest measure of what the state adds, and it's where
 a raw-message window fails: ack chains, retry loops, task switches.
 
+Twenty-three hand-written turns are enough to show the mechanism works;
+they are not enough to claim a number. A benchmark built from real
+OpenCode transcripts is the next step before the percentages above should
+be quoted.
+
 The session set, with the state Jev produced on the way:
 
 ```
@@ -286,7 +291,9 @@ calls; the plugin runs under Bun, which reuses connections.
 - **MEDIUM is soft.** Jev is decisive on EASY and HARD and hedges on the
   middle, which matches what an
   [independent benchmark](https://dev.classmethod.jp/en/articles/jev-for-llm-model-routing/)
-  found. Expect some drift on "explain this briefly"-shaped prompts.
+  found. A bare "try again" with no prior state flips between EASY and
+  MEDIUM from run to run; inside a session the state settles it, standalone
+  it's a coin toss.
 - **A router can't fix a bad session.** Long threads rot, compaction is
   lossy, and the better habit may be a fresh context per phase with the plan
   in a file. Dialing effort well doesn't settle that question, though a
