@@ -1,6 +1,6 @@
 {
   "name": "opencode-effort-demux",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "OpenCode plugin: dial the right reasoning effort (or model) for every prompt via TypeSafe Jev, judged over the session context — not just the message. Effort-first, cache-friendly.",
   "type": "module",
   "main": "./src/main.ts",

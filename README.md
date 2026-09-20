@@ -4,9 +4,10 @@ An OpenCode plugin that picks how much reasoning effort each message gets.
 
 "thanks" should not cost the same as "design a consensus protocol". Most
 messages in a coding session are small: acknowledgements, follow-ups,
-one-line edits. A few are genuinely hard. prompt-demux reads each message
-*and the last few turns of the session*, sorts it into EASY / MEDIUM / HARD,
-and sets the model and reasoning effort for that one message accordingly.
+one-line edits. A few are genuinely hard. prompt-demux tracks how hard the
+*current task* is, turn by turn, sorts each message into EASY / MEDIUM /
+HARD in that light, and sets the model and reasoning effort for that one
+message accordingly.
 
 [![CI](https://github.com/ajaleelp/prompt-demux/actions/workflows/ci.yml/badge.svg)](https://github.com/ajaleelp/prompt-demux/actions)
 [![Node](https://img.shields.io/badge/node-22%2B-green)](https://nodejs.org)
@@ -28,15 +29,16 @@ you:  thanks
 
 ## What makes it different
 
-**It sees the session, not just the message.** Every other router classifies
+**It tracks the task, not just the message.** Every other router classifies
 the text of the message on its own. That fails on exactly the messages a
-coding session is full of: "fix it", "continue", "try again", "why". Those
-inherit the difficulty of whatever you were doing. prompt-demux sends the
-message together with the last three user turns and the last tool result or
-assistant reply, so "fix it" after a typo is EASY and "fix it" after a
-failing concurrent-merge test is HARD. This is possible because it runs
-inside OpenCode as a plugin; a proxy in front of the API can't see any of
-that.
+coding session is full of: "fix it", "continue", "ok", "try again". Those
+carry the difficulty of whatever you were doing. prompt-demux keeps a small
+typed state per session (how hard the task is, what phase it's in, how
+stuck you are, which message started it) and has Jev update it every turn.
+"fix it" after a typo is EASY; "fix it" as the third failed attempt at a
+concurrent merge is HARD, and the state shows `stuck` climbing 1.1 → 1.7 →
+2.5 while it happens. This is possible because it runs inside OpenCode as a
+plugin; a proxy in front of the API can't see the session.
 
 **Effort first, model second.** The default mode keeps one model and dials
 its reasoning effort (`@low` / `@high` / `@max`) per message. The prompt
@@ -49,11 +51,12 @@ supported too, it's just not the default.
 a local Ollama model, free tiers for EASY and premium credits for HARD only.
 The defaults are one person's preferences; the file is yours.
 
-**Judged by a decision model, not an LLM.** Classification is one call to
+**Judged by a decision model, not an LLM.** Each turn is one call to
 [TypeSafe Jev](https://typesafe.ai), a model that returns typed answers with
-calibrated probabilities instead of text. Around 100 ms of inference, no
-prompt to parse, and the tier definitions are three sentences of plain
-English in the plugin source. Change them and the dial moves; there is
+calibrated probabilities instead of text: seven questions, ~100 ms of
+inference, no prompt to parse. Jev itself is stateless; the plugin holds the
+state and Jev is the transition function. Every definition the dial uses is
+plain English in the plugin source. Change it and the dial moves; there is
 nothing to retrain.
 
 ## Quickstart
@@ -161,82 +164,133 @@ The API key is only ever read from `TYPESAFE_API_KEY`.
 flowchart TD
     A["message"] --> B{"!override prefix?"}
     B -- yes --> H
-    B -- no --> C{"greeting / ack?"}
+    B -- no --> C{"no task in flight and a greeting/ack?"}
     C -- yes --> E["EASY, 0 ms"] --> H
-    C -- no --> D["last 3 user turns + last tool result"]
-    D --> F["Jev: tier, continues_prior_work, failure_is_environmental"]
-    F --> H["mode[tier] → provider/model@variant"]
+    C -- no --> D["prior state + summary of the last assistant turn"]
+    D --> F["Jev: same_task, difficulty, phase, scope, stuck, tier"]
+    F --> G["store the new state"] --> H["mode[tier] → provider/model@variant"]
     H --> I["OpenCode sends the request"]
 ```
 
-1. Overrides win. Then a zero-cost regex catches greetings and
-   acknowledgements.
-2. For anything else the plugin fetches the session's recent messages via
-   the OpenCode SDK and builds a small state object: the message, the last
-   three user turns (300 chars each), and the last assistant outcome, which
-   is the most recent tool error if there was one, otherwise the assistant's
-   last text.
-3. One request to Jev asks three questions over that state. `tier` is a
-   choice between EASY / MEDIUM / HARD. `continues_prior_work` and
-   `failure_is_environmental` are yes/no probabilities; they are logged
-   today and not yet acted on.
-4. The tier is looked up in the active mode and the result is written onto
-   the message's `model` (and `variant`) before OpenCode sends it.
+The plugin keeps one small state per session:
 
-Results are cached on message + context, so the same follow-up after the
-same work costs nothing. Task-tool subagents pass through the same hook and
-are dialed on their own subtask.
+```json
+{ "difficulty": 3.9, "phase": "debugging", "scope": "system", "stuck": 2.5,
+  "task_anchor": "Implement vector-clock based conflict resolution", "turns": 7 }
+```
+
+Each turn Jev gets `{ message, prior, last_turn }`, where `last_turn` is a
+deterministic summary of the last assistant message built in code (tool
+calls, errors, last error, final text). It answers seven questions in one
+request:
+
+| Question | Type | What it decides |
+|---|---|---|
+| `same_task` | yes/no | does the message continue `prior.task_anchor`, or start something new? |
+| `difficulty` | score 0–4 | how hard the current task is, as understood so far |
+| `phase` | choice | exploring / designing / implementing / debugging / verifying / idle |
+| `scope` | choice | one-line / function / module / system |
+| `stuck` | score 0–3 | consecutive attempts that didn't resolve |
+| `tier` | choice | EASY / MEDIUM / HARD for this message, given all of the above |
+| `tier_fresh` | choice | the same, judged with `prior` ignored |
+
+Then code applies two rules. If `same_task` is below 0.4 the task changed:
+the state resets, the message becomes the new anchor, and `tier_fresh` is
+used instead of `tier`. (Judged next to a HARD prior, a fresh MEDIUM task
+reads as EASY by contrast; the prior-blind question fixes that without a
+second round-trip.) Otherwise the answers become the new state and `tier`
+is used as is. There is no hard-coded floor; the prior state is the floor.
+
+Raw history never accumulates. Jev sees the shape of the task plus one
+anchor sentence, so turn 200 costs the same as turn 2, and the log is a
+readable trajectory: `difficulty 2.1 → 4.4`, `stuck 0 → 1 → 2`.
+
+Overrides win over everything. The zero-cost greeting regex only runs when
+no task is in flight, because "ok" after "Proceed?" carries the task's
+effort and only Jev can tell. Results are cached on message + state. Task-
+tool subagents pass through the same hook with their own state.
 
 Every decision is logged:
 
 ```
-dialed HARD -> opencode/gemini-3.8-flash@max source=classifier confidence=1.00 continuesPriorWork=0.95 failureIsEnvironmental=0.25 classifierLatencyMs=352
+dialed HARD -> opencode/gemini-3.8-flash@max source=classifier confidence=0.97 sameTask=0.95 state={difficulty:3.9,phase:debugging,scope:system,stuck:2.5,turns:3} classifierLatencyMs=352
 ```
 
 ## Benchmarks
 
 `npm run bench` in `opencode-plugin/`. September 2026, measured from
-Asia-Pacific.
+Asia-Pacific. Numbers move by ±1 between runs.
 
-| Set | Result | Median latency |
-|---|---|---|
-| 30 single prompts, 10 per tier | 28–29 / 30 | 365 ms |
-| 6 context-dependent follow-ups | 6 / 6 | 368 ms |
-
-The one or two misses on the first set are EASY↔MEDIUM on prompts like
-"what does this function do?", and Jev reports low confidence (≤0.6) on
-them. EASY and HARD come back at ≥0.95.
-
-The second set is the same short message with different session state:
-
-| Message | After | Tier | Signals |
+| Set | With state | `--no-state` | Median latency |
 |---|---|---|---|
-| fix it | a README typo fix | EASY 0.95 | continues 0.66 |
-| fix it | 4 failing tests, race in `merge()` | HARD 1.00 | continues 0.95 |
-| continue | a variable rename | EASY 0.73 | continues 0.93 |
-| continue | section 1 of 4 of a consensus design | HARD 1.00 | continues 0.97 |
-| try again | `ModuleNotFoundError: pytest` | MEDIUM 0.65 | env_fail 0.94 |
-| why | proposing an outbox pattern for a monolith split | HARD 0.83 | continues 0.89 |
+| 30 single prompts, 10 per tier | 27–29 / 30 | same (no state to remove) | 360 ms |
+| 6 follow-ups with only a `last_turn` | 5 / 6 | same | 360 ms |
+| **5 scripted sessions, 23 turns** | **22 / 23** | **18 / 23** | 365 ms |
 
-Of the ~365 ms, Jev's own inference is 85–127 ms (its
+The ablation is the same model, prompts and questions with `prior` blanked
+every turn. It's the honest measure of what the state adds, and it's where
+a raw-message window fails: ack chains, retry loops, task switches.
+
+The session set, with the state Jev produced on the way:
+
+```
+-- ack chain after a HARD task
+✓ Implement vector-clock based conflict re…  HARD 0.99  diff=3.8 stuck=0.0 implementing/system
+✓ ok                                          HARD 0.99  diff=3.6
+✓ yes                                         HARD 0.97  diff=3.2
+✓ go on / continue / continue / and then?     HARD       diff=3.4–3.8
+✓ continue (after a failing test)             HARD 0.98  diff=3.9 stuck=1.8 debugging/system
+
+-- retry loop
+✓ Implement a distributed transaction coor…  HARD 1.00  stuck=0.0
+✓ try again                                   HARD 0.94  stuck=1.1
+✓ still failing, fix it                       HARD 0.98  stuck=1.7
+✓ fix it                                      HARD 0.97  stuck=2.5
+
+-- task switch mid-HARD
+✓ Design a consensus protocol that tolerat…  HARD 1.00
+✓ continue                                    HARD 0.94
+✓ fix the typo in the README title            EASY 1.00  same_task=0.05 → reset, diff=0.2
+✓ thanks, now explain closures in JavaScript  MEDIUM 0.86  same_task=0.04 → reset
+
+-- environmental failure on a MEDIUM task
+✓ Add tests for the login module              MEDIUM 0.97
+✓ try again (ModuleNotFoundError: pytest)     MEDIUM 0.34  stuck=1.0
+✓ ok run them                                 MEDIUM       stuck=0.0
+
+-- EASY chat, then HARD
+✗ hi, what does this function do?             MEDIUM 0.54  (want EASY; arguable)
+✓ cool                                        EASY 0.94
+✓ now design a system that scales this to 1…  HARD 1.00  same_task=0.22 → reset
+✓ continue                                    HARD 0.97
+```
+
+The single-prompt misses are EASY↔MEDIUM on prompts like "what does this
+function do?", where Jev reports low confidence. EASY and HARD come back at
+≥0.95; MEDIUM is the soft tier.
+
+Of the ~360 ms, Jev's own inference is 85–127 ms (its
 `x-envoy-upstream-service-time` header); the rest is the round trip to
-their region. From Python `urllib` without keep-alive the same calls took
-~900 ms; the plugin runs under Bun, which reuses connections.
+their region. Python `urllib` without keep-alive took ~900 ms for the same
+calls; the plugin runs under Bun, which reuses connections.
 
 ## Tradeoffs
 
 - **The decision leaves your machine.** Your message and the last few turns
   go to `api.typesafe.ai`. v0.1 ran entirely locally; this doesn't.
-- **~350 ms per classified message.** Ten times the old local model. It sits
+- **~360 ms per classified message.** Ten times the old local model. It sits
   in front of a model call that takes seconds, so it's rarely noticeable,
-  but it is there.
+  but it is there. Greetings still cost 0 ms until a task is in flight.
+- **State is in memory.** A plugin restart starts from a blank state and
+  re-converges within a turn or two.
 - **MEDIUM is soft.** Jev is decisive on EASY and HARD and hedges on the
   middle, which matches what an
   [independent benchmark](https://dev.classmethod.jp/en/articles/jev-for-llm-model-routing/)
   found. Expect some drift on "explain this briefly"-shaped prompts.
 - **A router can't fix a bad session.** Long threads rot, compaction is
   lossy, and the better habit may be a fresh context per phase with the plan
-  in a file. Dialing effort well doesn't settle that question.
+  in a file. Dialing effort well doesn't settle that question, though a
+  rising `stuck` score is the first signal you'd want for it.
 
 ## Similar work
 
@@ -250,7 +304,7 @@ their region. From Python `urllib` without keep-alive the same calls took
 
 Text-only classifiers, Jev included, top out around 76% in published
 comparisons. The gain here comes from what Jev is shown, not from Jev
-itself.
+itself; the `--no-state` ablation above is the measurement.
 
 ## How we got here
 
@@ -269,21 +323,28 @@ worse than no model at all; it collapsed the MEDIUM class and sent seven
 HARD prompts to EASY. Every tweak to the tier definitions meant retraining.
 
 Jev takes structured state as input, so the context problem became a
-matter of passing the right fields. Same 30 prompts: 93–97%. The six
-context-dependent cases above: all correct. So v0.2 deleted the Python
-service and the model. The old code is in git history at
-[`543f197`](https://github.com/ajaleelp/prompt-demux/tree/543f197/classifier-service).
+matter of passing the right fields. v0.2 sent the last three raw turns and
+the last tool result: same 30 prompts, 93–97%. It deleted the Python
+service and the model (old code at
+[`543f197`](https://github.com/ajaleelp/prompt-demux/tree/543f197/classifier-service)).
+
+A three-turn window still fails on ack chains ("ok", "yes", "continue" ×8
+after a HARD task leaves nothing about the task in view), and sending more
+raw history is the wrong fix: irrelevant state degrades judgment and
+latency scales with input. v0.3 replaced the window with the typed state
+described above, and gated the greeting regex, which had been dialing
+"continue" EASY at 0 ms mid-task.
 
 ## Development
 
 ```
 opencode-plugin/
-├── src/lib.ts        parsing, config, heuristics, buildSessionState(), jevClassify(), tier prose
+├── src/lib.ts        parsing, config, heuristics, summarizeLastTurn(), applyAnswers(), jevUpdate(), the questions
 ├── src/main.ts       chat.message hook + router tool
 └── tests/
-    ├── lib.test.ts   23 unit tests (node:test, no network)
+    ├── lib.test.ts   24 unit tests (node:test, no network)
     ├── smoke.mjs     end-to-end against live Jev
-    └── jev-bench.mjs accuracy benchmark
+    └── jev-bench.mjs accuracy benchmark (--no-state for the ablation)
 scripts/setup.sh      npm install + global shim
 scripts/install-global.sh
 .opencode/plugins/prompt-demux.ts   shim OpenCode auto-loads in this repo
@@ -307,7 +368,9 @@ Notes for anyone hacking on it:
 - The virtual `prompt-demux/*` provider is injected in the `config` hook so
   it shows up in the dropdown. `small_model` is redirected away from it so
   title generation and compaction never hit the virtual provider.
-- Fallback chain: override → heuristic → cached Jev → Jev → MEDIUM.
+- Fallback chain: override → heuristic (no task in flight) → cached Jev →
+  Jev → MEDIUM.
+- `docs/plans/` has the design and plan for the state estimator.
 
 ## Troubleshooting
 
@@ -320,11 +383,10 @@ Notes for anyone hacking on it:
 
 ## Roadmap
 
-- [ ] Act on the signals: inherit the previous tier when
-      `continues_prior_work` is high; don't inflate on
-      `failure_is_environmental`
-- [ ] A larger context-dependent benchmark built from real OpenCode session
-      transcripts
+- [ ] Act on `stuck`: a "consider `/compact <focus>` or a fresh session"
+      toast once real logs show it's reliable
+- [ ] Persist session state across plugin restarts
+- [ ] A benchmark built from real OpenCode session transcripts
 - [ ] Confidence threshold for the soft MEDIUM tier
 
 ## License
