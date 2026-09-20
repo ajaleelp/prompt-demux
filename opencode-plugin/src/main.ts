@@ -11,10 +11,13 @@ import {
   parseOverrides,
   heuristicTier,
   saveConfig,
-  buildSessionState,
-  jevClassify,
+  applyAnswers,
+  jevUpdate,
+  summarizeLastTurn,
   TIERS,
   type Classification,
+  type JevInput,
+  type LastTurn,
   type SessionState,
   type RouterConfig,
   type Tier,
@@ -27,15 +30,19 @@ const CACHE_MAX = 500
 const classificationCache = new Map<string, Classification>()
 
 async function classifyCached(
-  state: SessionState,
+  input: JevInput,
   opts: { apiKey: string; url?: string; timeoutMs: number },
 ): Promise<Classification | null> {
-  // Same message + same context = same answer. Keyed on the whole state, so "fix it" after
-  // different work is a different entry.
-  const key = JSON.stringify(state)
+  // Same message in the same state = same answer. `turns` is a counter, not evidence, and the
+  // weighted scores drift by hundredths between turns, so the key rounds them to halves.
+  const p = input.prior
+  const key = JSON.stringify({
+    ...input,
+    prior: p && { ...p, turns: undefined, difficulty: Math.round(p.difficulty * 2) / 2, stuck: Math.round(p.stuck * 2) / 2 },
+  })
   const hit = classificationCache.get(key)
   if (hit) return { ...hit, cacheHit: true }
-  const result = await jevClassify(state, opts)
+  const result = await jevUpdate(input, opts)
   if (result) {
     if (classificationCache.size >= CACHE_MAX) {
       const oldest = classificationCache.keys().next().value
@@ -49,6 +56,8 @@ async function classifyCached(
 export const PromptDemuxPlugin: Plugin = async ({ client, worktree, directory }) => {
   /** sessionID -> mode override (set via !mode: prefix), sticks for the session */
   const sessionModes = new Map<string, string>()
+  /** sessionID -> typed difficulty state, updated by Jev every classified turn */
+  const sessionStates = new Map<string, SessionState>()
 
   async function log(level: "info" | "warn" | "error", message: string, extra?: Record<string, unknown>) {
     try {
@@ -58,13 +67,13 @@ export const PromptDemuxPlugin: Plugin = async ({ client, worktree, directory })
     }
   }
 
-  /** Last few turns of the session, distilled for Jev. Empty state if the SDK call fails. */
-  async function sessionState(sessionID: string, message: string): Promise<SessionState> {
+  /** Deterministic summary of the last assistant turn; undefined if the SDK call fails. */
+  async function lastTurn(sessionID: string): Promise<LastTurn | undefined> {
     try {
       const res = await client.session.messages({ path: { id: sessionID }, query: { directory } })
-      return buildSessionState(message, (res.data ?? []) as never)
+      return summarizeLastTurn((res.data ?? []) as never)
     } catch {
-      return buildSessionState(message, [])
+      return undefined
     }
   }
 
@@ -164,21 +173,25 @@ export const PromptDemuxPlugin: Plugin = async ({ client, worktree, directory })
       let source: "override" | "heuristic" | "classifier" | "fallback"
       let latencyMs = 0
       let cacheHit = false
-      let signals: Record<string, number> = {}
+      let signals: Record<string, unknown> = {}
+      const prior = sessionStates.get(input.sessionID)
 
       const heuristic = overrides.tier ? null : heuristicTier(overrides.rest || text)
       if (overrides.tier) {
         tier = overrides.tier
         source = "override"
+        if (prior) prior.turns += 1
       } else if (heuristic) {
         tier = heuristic
         source = "heuristic"
         confidence = 1
+        if (prior) prior.turns += 1
       } else {
         const apiKey = process.env.TYPESAFE_API_KEY
+        const message = overrides.rest || text
         const result = apiKey
           ? await classifyCached(
-              await sessionState(input.sessionID, overrides.rest || text),
+              { message, prior, last_turn: await lastTurn(input.sessionID) },
               { apiKey, url: clsUrl, timeoutMs: clsTimeout },
             )
           : null
@@ -187,10 +200,9 @@ export const PromptDemuxPlugin: Plugin = async ({ client, worktree, directory })
           confidence = result.confidence
           latencyMs = result.latency_ms
           cacheHit = result.cacheHit ?? false
-          signals = {
-            continuesPriorWork: result.continuesPriorWork,
-            failureIsEnvironmental: result.failureIsEnvironmental,
-          }
+          const next = applyAnswers(prior, message, result)
+          sessionStates.set(input.sessionID, next)
+          signals = { sameTask: result.same_task, state: next }
           source = "classifier"
         } else {
           tier = "MEDIUM"

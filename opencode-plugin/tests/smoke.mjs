@@ -74,10 +74,16 @@ assert.deepStrictEqual(r.model, { providerID: "opencode", modelID: "gemini-3.8-f
 assert.strictEqual(lastExtra().source, "classifier")
 assert.strictEqual(lastExtra().cacheHit, false)
 
-// 2. cache: same query again -> cacheHit, same result
-r = await route("Explain closures in JavaScript")
+// 2. session state: the first call created it; a repeat of the same message in the same
+//    state (only `turns` differs, which is excluded from the cache key) hits the cache.
+assert.ok(lastExtra().state, "classifier path must record a session state")
+assert.strictEqual(lastExtra().state.turns, 0)
+r = await route("Explain closures in JavaScript") // prior now exists -> new Jev call
+assert.strictEqual(lastExtra().cacheHit, false)
+assert.strictEqual(lastExtra().state.turns, 1, "same task should advance, not reset")
+r = await route("Explain closures in JavaScript") // same prior modulo turns -> cache
 assert.deepStrictEqual(r.model, { providerID: "opencode", modelID: "gemini-3.8-flash", variant: "high" })
-assert.strictEqual(lastExtra().cacheHit, true, "second identical query should hit cache")
+assert.strictEqual(lastExtra().cacheHit, true, "third identical query should hit cache")
 
 // 3. tier override + prefix stripping (no classifier call)
 r = await route("!hard refactor this monolith now")
@@ -112,7 +118,7 @@ assert.deepStrictEqual(r.model, ref("opencode/muse-spark-1.2-contributor-free"))
 // 6. session mode override: !mode:balanced sticks for the session
 r = await route("!mode:balanced What time is it?")
 assert.deepStrictEqual(r.model, ref("opencode/glm-5.3-flash"))
-r = await route("Explain closures in JavaScript") // cached MEDIUM -> balanced MEDIUM
+r = await route("Explain closures in JavaScript") // MEDIUM -> balanced MEDIUM
 assert.deepStrictEqual(r.model, ref("opencode/deepseek-v4-pro"), "session mode override should stick")
 
 // 7. bad mode name falls back to the config's activeMode (effort)

@@ -19,53 +19,127 @@ export type RouterConfig = {
   toast?: boolean
 }
 
-export type Classification = {
+/**
+ * Typed per-session state. Jev is stateless; the plugin holds this and asks Jev to
+ * update it every turn, so tier decisions track the whole session, not a window of it.
+ */
+export type SessionState = {
+  /** 0–4, probability-weighted: how hard the current task is as understood so far */
+  difficulty: number
+  phase: string
+  scope: string
+  /** 0–3, probability-weighted: consecutive attempts that did not resolve */
+  stuck: number
+  /** the message that started the current task */
+  task_anchor: string
+  turns: number
+}
+
+/** Deterministic summary of the last assistant turn, built in code. */
+export type LastTurn = { tool_calls: number; errors: number; last_error: string; final_text: string }
+
+/** What Jev sees. Never raw history: the shape of the task plus one anchor sentence. */
+export type JevInput = { message: string; prior?: SessionState; last_turn?: LastTurn }
+
+export type JevAnswers = {
+  /** P(message continues the task `prior.task_anchor` describes) */
+  same_task: number
+  difficulty: number
+  phase: string
+  scope: string
+  stuck: number
   tier: Tier
   confidence: number
   probabilities: Record<string, number>
-  /** P(this message continues the work in progress rather than starting something new) */
-  continuesPriorWork: number
-  /** P(the last failure was environmental — missing dep, flaky test — not task difficulty) */
-  failureIsEnvironmental: number
-  latency_ms: number
-  cacheHit?: boolean
 }
 
-/** What Jev sees. The message alone is a weak signal ("fix it"); the session state is the point. */
-export type SessionState = {
-  message: string
-  prior_user_turns: string[]
-  last_assistant_outcome: string
-}
+export type Classification = JevAnswers & { latency_ms: number; cacheHit?: boolean }
 
 export const JEV_URL = "https://api.typesafe.ai/v1/systemone"
 
-/** Tier definitions are prose — edit these to move the dial, no retraining. */
+/** Everything the dial knows is prose here. Edit to move it; nothing to retrain. */
 export const JEV_QUESTIONS = {
+  same_task: {
+    type: "noul",
+    instructions:
+      "Does `message` continue the task described by `prior.task_anchor` (and the state in `prior`), " +
+      "rather than start something unrelated? If there is no `prior`, answer no.",
+  },
+  difficulty: {
+    type: "score",
+    instructions:
+      "How hard is the task the user is working on now, given `message`, `prior` (how it looked so far) and `last_turn`? " +
+      "Short messages like 'continue' or 'fix it' keep the prior difficulty; a new unrelated task gets its own.",
+    criteria: [
+      "Greeting, acknowledgement, one-line lookup, or a trivial edit such as a rename or typo.",
+      "A small, well-scoped change or explanation: one function, one concept, a config value.",
+      "A module-sized task: write or refactor a component, add tests, fix a typed bug across a few files.",
+      "Cross-cutting work: a subsystem, tricky debugging across modules, performance work, non-trivial algorithms.",
+      "System design, distributed systems, concurrency, consensus, or architecture-level change.",
+    ],
+  },
+  phase: {
+    type: "choice",
+    instructions: "Which phase of the task is the user in now, given `message`, `prior.phase` and `last_turn`?",
+    criteria: {
+      exploring: "Reading, asking what something does, orienting.",
+      designing: "Deciding an approach, discussing tradeoffs, planning.",
+      implementing: "Writing or changing code toward the plan.",
+      debugging: "Something failed and the user is trying to make it work.",
+      verifying: "Running tests, reviewing, checking results before calling it done.",
+      idle: "Chit-chat, thanks, or no task in flight.",
+    },
+  },
+  scope: {
+    type: "choice",
+    instructions: "How much of the codebase does the current task touch?",
+    criteria: {
+      "one-line": "A single line or value.",
+      function: "One function or a small block.",
+      module: "One file or component, possibly with its tests.",
+      system: "Many modules, an architecture, or cross-service behaviour.",
+    },
+  },
+  stuck: {
+    type: "score",
+    instructions:
+      "How stuck is the user on the current task? Use `prior.stuck`, `last_turn.errors` and whether `message` is a retry " +
+      "('try again', 'still failing', 'fix it') versus new progress.",
+    criteria: [
+      "Progressing: the last turn succeeded or this is a fresh request.",
+      "One attempt failed; the user is retrying or redirecting.",
+      "Two attempts at the same thing have failed.",
+      "Three or more attempts have failed; the approach itself is in question.",
+    ],
+  },
   tier: {
     type: "choice",
     instructions:
-      "How much reasoning effort does answering `message` require, given the session context? " +
-      "Short messages like 'fix it' or 'continue' inherit the difficulty of the work in progress.",
+      "How much reasoning effort should the model apply to answer `message` right now, given `prior`, `last_turn` and " +
+      "the task's difficulty? Short follow-ups inherit the effort of the work in progress; a trivial aside during a hard task is still EASY.",
     criteria: {
-      EASY: "Greetings, acknowledgements, one-line lookups, trivial edits (rename, typo). No design thinking.",
-      MEDIUM: "A well-scoped coding task: write/refactor/test one function or module, explain a concept.",
+      EASY: "No design thinking: greetings, acknowledgements, lookups, trivial edits.",
+      MEDIUM: "A well-scoped coding task or explanation: one function or module.",
       HARD: "System design, distributed systems, concurrency, architecture, or continuing such work.",
     },
   },
-  continues_prior_work: {
-    type: "noul",
+  // Judged next to a HARD prior, a fresh MEDIUM task reads as EASY by contrast. This question
+  // is prior-blind; code uses it when `same_task` says the message starts a new task.
+  tier_fresh: {
+    type: "choice",
     instructions:
-      "Does `message` refer to or continue the work described in `prior_user_turns` / `last_assistant_outcome`, " +
-      "rather than starting something new?",
-  },
-  failure_is_environmental: {
-    type: "noul",
-    instructions:
-      "Is `last_assistant_outcome` a failure caused by the environment (missing dependency, flaky test, tooling) " +
-      "rather than by the difficulty of the task itself?",
+      "Ignore `prior` and `last_turn` completely. Judge `message` on its own, as if it were the first message of a " +
+      "new session: how much reasoning effort does answering it require?",
+    criteria: {
+      EASY: "No design thinking: greetings, acknowledgements, lookups, trivial edits.",
+      MEDIUM: "A well-scoped coding task or explanation: one function or module.",
+      HARD: "System design, distributed systems, concurrency, architecture.",
+    },
   },
 } as const
+
+/** Below this, the message starts a new task: state resets and the prior-blind tier is used. */
+export const SAME_TASK_THRESHOLD = 0.4
 
 /** Minimal shape of OpenCode's session.messages() rows we read. */
 type MessageRow = {
@@ -77,33 +151,37 @@ type MessageRow = {
   >
 }
 
-/** Distill the last few turns into the state Jev judges. Pure; unit-tested. */
-export function buildSessionState(message: string, rows: MessageRow[], turns = 3): SessionState {
-  const textOf = (r: MessageRow) =>
-    r.parts.map((p) => ("text" in p && p.type === "text" ? p.text : "")).join(" ").trim()
-
-  const users = rows.filter((r) => r.info.role === "user").map(textOf).filter(Boolean)
-  // The hook may fire after the current message is persisted; don't feed it back as "prior".
-  if (users.at(-1) === message) users.pop()
-
+/** Deterministic summary of the last assistant message: counts, last error, final text. Pure; unit-tested. */
+export function summarizeLastTurn(rows: MessageRow[]): LastTurn | undefined {
   const last = rows.filter((r) => r.info.role === "assistant").at(-1)
-  let outcome = ""
-  if (last) {
-    const err = last.parts.find((p) => p.type === "tool" && "state" in p && p.state.status === "error")
-    if (err && "state" in err) outcome = `tool error: ${err.tool}: ${err.state.error ?? ""}`
-    else if (last.info.error) outcome = `error: ${JSON.stringify(last.info.error)}`
-    else outcome = textOf(last)
-  }
+  if (!last) return undefined
+  const tools = last.parts.filter((p): p is Extract<MessageRow["parts"][number], { type: "tool" }> => p.type === "tool" && "state" in p)
+  const errs = tools.filter((t) => t.state.status === "error")
+  const texts = last.parts.filter((p): p is { type: "text"; text: string } => p.type === "text" && "text" in p)
   return {
-    message,
-    prior_user_turns: users.slice(-turns).map((t) => t.slice(0, 300)),
-    last_assistant_outcome: outcome.slice(0, 300),
+    tool_calls: tools.length,
+    errors: errs.length,
+    last_error: (errs.at(-1)?.state.error ?? "").slice(0, 300),
+    final_text: (texts.at(-1)?.text ?? "").slice(0, 300),
   }
 }
 
-/** One Jev call: all three questions in parallel over the same state. Returns null on any failure. */
-export async function jevClassify(
-  state: SessionState,
+/** Reset-or-advance policy: a new task starts when Jev says the message doesn't continue the prior one. */
+export function applyAnswers(prior: SessionState | undefined, message: string, a: JevAnswers): SessionState {
+  const reset = !prior || a.same_task < SAME_TASK_THRESHOLD
+  return {
+    difficulty: a.difficulty,
+    phase: a.phase,
+    scope: a.scope,
+    stuck: a.stuck,
+    task_anchor: reset ? message.slice(0, 300) : prior.task_anchor,
+    turns: reset ? 0 : prior.turns + 1,
+  }
+}
+
+/** One Jev call: six questions over the same input. Returns null on any failure. */
+export async function jevUpdate(
+  input: JevInput,
   opts: { apiKey: string; url?: string; timeoutMs?: number; model?: string },
 ): Promise<Classification | null> {
   const t0 = performance.now()
@@ -111,24 +189,32 @@ export async function jevClassify(
     const res = await fetch(opts.url ?? JEV_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${opts.apiKey}` },
-      body: JSON.stringify({ state, model: opts.model ?? "jev-latest", questions: JEV_QUESTIONS }),
+      body: JSON.stringify({ state: input, model: opts.model ?? "jev-latest", questions: JEV_QUESTIONS }),
       signal: AbortSignal.timeout(opts.timeoutMs ?? 2000),
     })
     if (!res.ok) return null
     const { answers: a } = (await res.json()) as {
       answers: {
+        same_task: { noul: number }
+        difficulty: { score: number }
+        phase: { choice: string }
+        scope: { choice: string }
+        stuck: { score: number }
         tier: { choice: Tier; confidence: number; probabilities: Record<string, number> }
-        continues_prior_work: { noul: number }
-        failure_is_environmental: { noul: number }
+        tier_fresh: { choice: Tier; confidence: number; probabilities: Record<string, number> }
       }
     }
-    if (!TIERS.includes(a.tier.choice)) return null
+    const t = input.prior && a.same_task.noul < SAME_TASK_THRESHOLD ? a.tier_fresh : a.tier
+    if (!TIERS.includes(t.choice)) return null
     return {
-      tier: a.tier.choice,
-      confidence: a.tier.confidence,
-      probabilities: a.tier.probabilities,
-      continuesPriorWork: a.continues_prior_work.noul,
-      failureIsEnvironmental: a.failure_is_environmental.noul,
+      same_task: a.same_task.noul,
+      difficulty: a.difficulty.score,
+      phase: a.phase.choice,
+      scope: a.scope.choice,
+      stuck: a.stuck.score,
+      tier: t.choice,
+      confidence: t.confidence,
+      probabilities: t.probabilities,
       latency_ms: performance.now() - t0,
     }
   } catch {

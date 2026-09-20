@@ -199,45 +199,59 @@ test("saveConfig round-trips through loadConfig", () => {
   assert.equal(config.activeMode, "m")
 })
 
-// ---------- buildSessionState ----------
+// ---------- summarizeLastTurn / applyAnswers ----------
 
-import { buildSessionState } from "../src/lib.ts"
+import { applyAnswers, summarizeLastTurn } from "../src/lib.ts"
 
 const u = (text: string) => ({ info: { role: "user" as const }, parts: [{ type: "text", text }] })
 const a = (text: string) => ({ info: { role: "assistant" as const }, parts: [{ type: "text", text }] })
 
-test("buildSessionState keeps the last N prior user turns and the last assistant text", () => {
-  const rows = [u("one"), a("r1"), u("two"), a("r2"), u("three"), a("r3"), u("four"), a("r4")]
-  assert.deepStrictEqual(buildSessionState("fix it", rows), {
-    message: "fix it",
-    prior_user_turns: ["two", "three", "four"],
-    last_assistant_outcome: "r4",
-  })
-})
-
-test("buildSessionState drops the current message if already persisted, and surfaces tool errors", () => {
+test("summarizeLastTurn counts tool calls and errors on the last assistant turn", () => {
   const rows = [
     u("Add tests for login"),
+    a("old turn"),
+    u("try again"),
     {
       info: { role: "assistant" as const },
       parts: [
-        { type: "text", text: "running tests" },
+        { type: "tool", tool: "bash", state: { status: "completed", output: "ok" } },
         { type: "tool", tool: "bash", state: { status: "error", error: "ModuleNotFoundError: pytest" } },
+        { type: "text", text: "pytest is missing" },
       ],
     },
-    u("try again"),
   ]
-  assert.deepStrictEqual(buildSessionState("try again", rows), {
-    message: "try again",
-    prior_user_turns: ["Add tests for login"],
-    last_assistant_outcome: "tool error: bash: ModuleNotFoundError: pytest",
+  assert.deepStrictEqual(summarizeLastTurn(rows), {
+    tool_calls: 2,
+    errors: 1,
+    last_error: "ModuleNotFoundError: pytest",
+    final_text: "pytest is missing",
   })
 })
 
-test("buildSessionState on an empty session is just the message", () => {
-  assert.deepStrictEqual(buildSessionState("hi", []), {
-    message: "hi",
-    prior_user_turns: [],
-    last_assistant_outcome: "",
+test("summarizeLastTurn is undefined with no assistant turn", () => {
+  assert.equal(summarizeLastTurn([u("hi")]), undefined)
+  assert.equal(summarizeLastTurn([]), undefined)
+})
+
+const answers = {
+  same_task: 0.9, difficulty: 3.5, phase: "debugging", scope: "module", stuck: 1.2,
+  tier: "HARD" as const, confidence: 0.95, probabilities: {},
+}
+
+test("applyAnswers starts a task when there is no prior state", () => {
+  assert.deepStrictEqual(applyAnswers(undefined, "Implement vector clocks", answers), {
+    difficulty: 3.5, phase: "debugging", scope: "module", stuck: 1.2,
+    task_anchor: "Implement vector clocks", turns: 0,
   })
+})
+
+test("applyAnswers advances the same task and resets on a new one", () => {
+  const prior = applyAnswers(undefined, "Implement vector clocks", answers)
+  const next = applyAnswers(prior, "continue", answers)
+  assert.equal(next.task_anchor, "Implement vector clocks")
+  assert.equal(next.turns, 1)
+  const reset = applyAnswers(next, "fix the README typo", { ...answers, same_task: 0.1, difficulty: 0.2 })
+  assert.equal(reset.task_anchor, "fix the README typo")
+  assert.equal(reset.turns, 0)
+  assert.equal(reset.difficulty, 0.2)
 })
